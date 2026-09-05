@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#11131a" />
+    <meta name="description" content="Orbit Agent — 可观测的多 Agent 协作工作台" />
+    <title>Orbit Agent · Collaborative Workspace</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="工作区导航">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <div class="brand-name">Orbit <span>Agent</span></div>
+            <div class="brand-caption">observable agent workspace</div>
+          </div>
+        </div>
+
+        <button class="primary-button new-thread-button" id="new-thread" type="button">
+          <span class="button-plus" aria-hidden="true">+</span> 新建协作线程
+        </button>
+
+        <div class="sidebar-section-label">WORKSPACE</div>
+        <nav class="nav-list" aria-label="主导航">
+          <button class="nav-item active" type="button" data-view="threads"><span class="nav-icon">▦</span> Threads <span class="nav-count" id="thread-count">0</span></button>
+          <button class="nav-item" type="button" data-view="memory"><span class="nav-icon">⌁</span> Memory <span class="nav-count" id="memory-count">0</span></button>
+          <button class="nav-item" type="button" data-view="tasks"><span class="nav-icon">✓</span> Tasks <span class="nav-count" id="task-count">0</span></button>
+        </nav>
+
+        <div class="sidebar-section-label agent-label">AGENTS <span>stable identities</span></div>
+        <div class="agent-list" id="agent-list"></div>
+
+        <div class="sidebar-section-label thread-label">RECENT THREADS</div>
+        <div class="thread-list" id="thread-list" role="list"></div>
+
+        <div class="sidebar-footer">
+          <div class="provider-pill"><span class="status-dot online"></span><span id="provider-label">Local demo provider</span></div>
+          <div class="version-label">v0.1 · focused runtime</div>
+        </div>
+      </aside>
+
+      <main class="workspace" id="workspace">
+        <header class="topbar">
+          <div class="breadcrumb"><span>Workspace</span><span class="crumb-slash">/</span><strong id="topbar-thread-title">Loading…</strong></div>
+          <div class="topbar-actions">
+            <span class="connection-label"><span class="status-dot online"></span> Runtime ready</span>
+            <button class="icon-button" id="refresh-button" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+            <a class="icon-button" href="/docs/ARCHITECTURE.md" target="_blank" title="查看架构说明" aria-label="查看架构说明">?</a>
+          </div>
+        </header>
+
+        <section class="thread-heading">
+          <div>
+            <div class="eyebrow">ACTIVE THREAD <span id="thread-id-label"></span></div>
+            <h1 id="thread-title">Loading…</h1>
+            <p id="thread-subtitle">选择一个 Agent，或在消息中使用 @mention 进行协作。</p>
+          </div>
+          <div class="thread-metrics">
+            <div class="metric"><span class="metric-value" id="message-metric">0</span><span class="metric-label">messages</span></div>
+            <div class="metric"><span class="metric-value" id="event-metric">0</span><span class="metric-label">trace events</span></div>
+          </div>
+        </section>
+
+        <div class="content-grid">
+          <section class="conversation-panel" aria-label="对话">
+            <div class="timeline" id="timeline" aria-live="polite"></div>
+            <div class="run-indicator hidden" id="run-indicator"><span class="pulse"></span><span id="run-label">Agents are thinking…</span></div>
+            <form class="composer" id="composer">
+              <div class="composer-toolbar">
+                <div class="mention-hints" id="mention-hints" aria-label="快速选择 Agent"></div>
+                <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+              </div>
+              <textarea id="message-input" rows="3" maxlength="30000" placeholder="描述一个问题，或使用 @atlas / @forge / @lens 指定 Agent…" required></textarea>
+              <div class="composer-footer">
+                <div class="composer-mode"><span class="mode-dot"></span> orchestrated turn <span class="mode-separator">·</span> context + memory enabled</div>
+                <button class="send-button" id="send-button" type="submit"><span>发送</span><span class="send-arrow">↗</span></button>
+              </div>
+            </form>
+          </section>
+
+          <aside class="inspector" aria-label="执行检查器">
+            <div class="inspector-card trace-card">
+              <div class="card-heading"><div><span class="card-kicker">OBSERVABILITY</span><h2>Execution trace</h2></div><span class="live-badge"><span class="status-dot online"></span> LIVE</span></div>
+              <div class="trace-list" id="trace-list"><div class="empty-state compact">发送一条消息后，这里会显示路由、记忆检索和 Agent 执行轨迹。</div></div>
+            </div>
+            <div class="inspector-card memory-card">
+              <div class="card-heading"><div><span class="card-kicker">RECALL</span><h2>Relevant memory</h2></div><button class="text-button" id="clear-memory-filter" type="button">全部</button></div>
+              <div class="memory-list" id="memory-list"><div class="empty-state compact">暂无记忆。可发送 <code>记住：…</code> 建立一条。</div></div>
+            </div>
+            <div class="inspector-card task-card">
+              <div class="card-heading"><div><span class="card-kicker">HANDOFF</span><h2>Open tasks</h2></div><span class="task-total" id="task-total">0</span></div>
+              <div class="task-list" id="task-list"><div class="empty-state compact">用 <code>任务：…</code> 创建可追踪任务。</div></div>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

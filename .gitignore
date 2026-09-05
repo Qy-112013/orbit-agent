@@ -1,0 +1,5 @@
+data/state.json
+data/state.json.*.tmp
+*.log
+node_modules/
+
