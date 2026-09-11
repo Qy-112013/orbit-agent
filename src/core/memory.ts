@@ -1,4 +1,6 @@
 import type { Memory, ProviderContext } from './types.ts';
+import type { StoragePort } from './contracts.ts';
+import { CONTEXT_LIMITS, conversationContext } from './conversation.ts';
 
 const STOP_WORDS = new Set([
   '的', '了', '和', '是', '在', '我', '你', '他', '她', '它', '请', '帮', '一下',
@@ -40,9 +42,9 @@ function rank(query: string, text: string, importance: number, createdAt: string
 }
 
 export class MemoryService {
-  private store: { addMemory(input: Record<string, unknown>): Promise<Memory>; listMemories(input?: Record<string, unknown>): Memory[]; getThread(id: string): { messages: Array<Record<string, unknown>> } | null };
+  private store: Pick<StoragePort, 'addMemory' | 'listMemories' | 'getThread' | 'touchThread'>;
 
-  constructor(store: { addMemory(input: Record<string, unknown>): Promise<Memory>; listMemories(input?: Record<string, unknown>): Memory[]; getThread(id: string): { messages: Array<Record<string, unknown>> } | null }) {
+  constructor(store: Pick<StoragePort, 'addMemory' | 'listMemories' | 'getThread' | 'touchThread'>) {
     this.store = store;
   }
 
@@ -66,20 +68,31 @@ export class MemoryService {
       .map(({ memory, score }) => ({ ...memory, score: Number(score.toFixed(4)), citation: `memory:${memory.id}` }));
   }
 
-  buildContext(threadId: string, query: string, { messageLimit = 12, memoryLimit = 6 }: { messageLimit?: number; memoryLimit?: number } = {}): ProviderContext {
+  async prepareContext(threadId: string, query: string, options: { messageLimit?: number; memoryLimit?: number; excludeMessageId?: string } = {}): Promise<ProviderContext> {
+    const previous = this.store.getThread(threadId)?.summary;
+    const context = this.buildContext(threadId, query, options);
+    if (context.summary && context.summary.throughSequence !== previous?.throughSequence) {
+      await this.store.touchThread(threadId, { summary: context.summary });
+    }
+    return context;
+  }
+
+  buildContext(threadId: string, query: string, { messageLimit = 12, memoryLimit = 6, excludeMessageId }: { messageLimit?: number; memoryLimit?: number; excludeMessageId?: string } = {}): ProviderContext {
     const thread = this.store.getThread(threadId);
     if (!thread) return { recentMessages: [], memories: [], citations: [] };
-    const recentMessages = thread.messages.slice(-messageLimit).map((message) => ({
-      id: message.id,
-      role: message.role,
-      agentId: message.agentId ?? null,
-      content: message.content.slice(0, 6000),
-      createdAt: message.createdAt,
-    }));
-    const memories = this.search(query, { threadId, limit: memoryLimit });
+    const { recentMessages, summary } = conversationContext(thread, { messageLimit, excludeMessageId });
+    let remaining = CONTEXT_LIMITS.memoryChars;
+    const memories = this.search(query, { threadId, limit: memoryLimit }).flatMap((memory) => {
+      if (remaining <= 0) return [];
+      const text = memory.text.slice(0, Math.min(1500, remaining));
+      remaining -= text.length;
+      return [{ ...memory, text }];
+    });
     return {
       recentMessages,
       memories,
+      ...(summary ? { summary } : {}),
+      contextChars: recentMessages.reduce((sum, message) => sum + message.content.length, 0) + (summary?.text.length ?? 0) + CONTEXT_LIMITS.memoryChars - remaining,
       citations: memories.map((memory) => ({ id: memory.citation, text: memory.text, source: memory.source })),
     };
   }

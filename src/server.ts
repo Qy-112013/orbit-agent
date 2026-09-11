@@ -5,11 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { AgentRegistry, DEFAULT_AGENTS } from './core/agent-registry.ts';
 import { MemoryService } from './core/memory.ts';
-import { Orchestrator } from './core/orchestrator.ts';
+import { Orchestrator, COLLABORATION_LIMITS } from './core/orchestrator.ts';
 import { createProviderFromEnv, createProviderRegistryFromEnv, ProviderRegistry } from './core/providers.ts';
 import { JsonStore } from './core/store.ts';
 import { createDefaultTools } from './core/tools.ts';
 import { SkillRegistry } from './core/skills.ts';
+import { KnowledgeService, KNOWLEDGE_LIMITS } from './core/knowledge.ts';
+import { CONTEXT_LIMITS } from './core/conversation.ts';
+import { PLAN_LIMITS } from './core/planner.ts';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(SRC_DIR, '..');
@@ -34,7 +37,7 @@ function headers(contentType = 'application/json; charset=utf-8') {
     'content-type': contentType,
     'cache-control': 'no-store',
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,PATCH,OPTIONS',
+    'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'access-control-allow-headers': 'content-type',
   };
 }
@@ -45,7 +48,7 @@ function sendJson(response, status, payload) {
 }
 
 function sendError(response, error) {
-  const code = error?.code === 'NOT_FOUND' ? 404 : error?.code === 'VALIDATION_ERROR' ? 400 : 500;
+  const code = error?.code === 'NOT_FOUND' ? 404 : error?.code === 'VALIDATION_ERROR' ? 400 : error?.code === 'CONFLICT' ? 409 : 500;
   sendJson(response, code, { error: { code: error?.code ?? 'INTERNAL_ERROR', message: String(error?.message ?? error) } });
 }
 
@@ -63,7 +66,9 @@ async function readJson(request) {
   }
   if (chunks.length === 0) return {};
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected object');
+    return parsed;
   } catch {
     const error = new Error('request body must be valid JSON');
     error.code = 'VALIDATION_ERROR';
@@ -122,7 +127,7 @@ function providerStatus(provider) {
   };
 }
 
-export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers } = {}) {
+export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
   const registry = new AgentRegistry(DEFAULT_AGENTS);
   const store = new JsonStore(dataFile, { seedAgents: registry.list() });
   await store.init();
@@ -130,17 +135,25 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   // the source of truth across restarts; defaults merely bootstrap a fresh
   // install.
   for (const agent of store.listAgents()) registry.register(agent);
-  const providerRuntime = providers ?? (provider ? new ProviderRegistry().register('default', provider) : createProviderRegistryFromEnv(process.env, registry.list(), PROJECT_DIR));
+  const providerRuntime = providers ?? (provider ? new ProviderRegistry().register('default', provider) : createProviderRegistryFromEnv(process.env, registry.list(), workspaceRoot));
   // A fresh install should have a usable first thread without a setup wizard.
   if (store.listThreads().length === 0) {
     await store.createThread({ title: '欢迎来到 Orbit Agent', activeAgentId: registry.default()?.id });
   }
   const memory = new MemoryService(store);
-  const tools = createDefaultTools({ memory, store, workspaceRoot: PROJECT_DIR });
+  const knowledge = new KnowledgeService(store);
+  const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
   const skills = await new SkillRegistry().loadDirectory(SKILLS_DIR);
-  const orchestrator = new Orchestrator({ store, registry, memory, provider: providerRuntime, tools, skills });
+  const orchestrator = new Orchestrator({ store, registry, memory, knowledge, provider: providerRuntime, tools, skills,
+    loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', ...loopOptions },
+  });
 
-  const runtime = { store, registry, memory, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
+  const runtime = { store, registry, memory, knowledge, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
+  const requireThread = (threadId) => {
+    const thread = store.getThread(threadId);
+    if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+    return thread;
+  };
 
   const server = createServer(async (request, response) => {
     try {
@@ -165,7 +178,7 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
       const method = request.method ?? 'GET';
 
       if (method === 'GET' && pathname === '/api/health') {
-        sendJson(response, 200, { ok: true, name: 'orbit-agent', version: '0.2.0', now: new Date().toISOString() });
+        sendJson(response, 200, { ok: true, name: 'orbit-agent', version: '0.3.0', now: new Date().toISOString() });
         return;
       }
       if (method === 'GET' && pathname === '/api/bootstrap') {
@@ -177,6 +190,11 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           tools: tools.list(),
           skills: skills.list().map(({ content, ...metadata }) => metadata),
           provider: providerStatus(providerRuntime),
+          execution: orchestrator.agentLoop.describe(),
+          collaboration: COLLABORATION_LIMITS,
+          planning: PLAN_LIMITS,
+          context: CONTEXT_LIMITS,
+          knowledge: { method: 'bm25', limits: KNOWLEDGE_LIMITS },
         });
         return;
       }
@@ -192,7 +210,7 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         return;
       }
       if (method === 'GET' && pathname === '/api/threads') {
-        sendJson(response, 200, { threads: store.listThreads() });
+        sendJson(response, 200, { threads: store.listThreads({ query: (requestUrl.searchParams.get('q') ?? '').slice(0, 2000), archived: requestUrl.searchParams.get('archived') === '1' }) });
         return;
       }
       if (method === 'POST' && pathname === '/api/threads') {
@@ -209,10 +227,30 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           error.code = 'NOT_FOUND';
           throw error;
         }
-        sendJson(response, 200, { thread });
+        sendJson(response, 200, { thread, busy: orchestrator.activeRuns.has(thread.id) });
         return;
       }
-      if (method === 'POST' && parts[0] === 'api' && parts[1] === 'threads' && parts[3] === 'messages') {
+      if (method === 'PATCH' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 3) {
+        const body = await readJson(request);
+        if (body.archived !== undefined && orchestrator.activeRuns.has(parts[2])) throw Object.assign(new Error('请等待当前执行结束后再归档会话。'), { code: 'CONFLICT' });
+        sendJson(response, 200, { thread: await store.updateThread(parts[2], { title: body.title, archived: body.archived }) });
+        return;
+      }
+      if (method === 'POST' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 4 && parts[3] === 'fork') {
+        const body = await readJson(request);
+        sendJson(response, 201, { thread: await store.forkThread(parts[2], { title: body.title, messageId: body.messageId }) });
+        return;
+      }
+      if (method === 'GET' && parts[0] === 'api' && parts[1] === 'threads' && parts[3] === 'plans' && (parts.length === 4 || parts.length === 5)) {
+        requireThread(parts[2]);
+        if (parts.length === 5) {
+          const plan = store.getPlan(parts[4]);
+          if (!plan || plan.threadId !== parts[2]) throw Object.assign(new Error('plan not found'), { code: 'NOT_FOUND' });
+          sendJson(response, 200, { plan });
+        } else sendJson(response, 200, { plans: store.listPlans({ threadId: parts[2] }) });
+        return;
+      }
+      if (method === 'POST' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 4 && parts[3] === 'messages') {
         const body = await readJson(request);
         const result = await orchestrator.submitMessage(parts[2], body.content, {
           clientRequestId: body.clientRequestId,
@@ -220,16 +258,16 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         sendJson(response, 200, result);
         return;
       }
-      if (method === 'GET' && parts[0] === 'api' && parts[1] === 'threads' && parts[3] === 'events') {
+      if (method === 'GET' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 4 && parts[3] === 'events') {
         const threadId = parts[2];
         if (!store.getThread(threadId)) {
           const error = new Error('thread not found');
           error.code = 'NOT_FOUND';
           throw error;
         }
-        const after = Number(requestUrl.searchParams.get('after') ?? request.headers['last-event-id'] ?? 0) || 0;
+        const after = Number(request.headers['last-event-id'] ?? requestUrl.searchParams.get('after') ?? 0) || 0;
         if (requestUrl.searchParams.get('stream') !== '1') {
-          sendJson(response, 200, { events: store.listEvents({ threadId, after, limit: 500 }) });
+          sendJson(response, 200, { events: store.listEvents({ threadId, after, limit: 500, latest: !requestUrl.searchParams.has('after') }) });
           return;
         }
         response.writeHead(200, {
@@ -245,14 +283,44 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         // between the read and the subscription cannot disappear. Clients
         // de-duplicate by event id; replay is therefore safe even if a frame
         // crosses the boundary while the connection is being established.
-        for (const event of store.listEvents({ threadId, after })) writeEvent(event);
-        response.write(`event: ready\ndata: ${JSON.stringify({ threadId })}\n\n`);
+        let cursor = after;
+        while (true) {
+          const page = store.listEvents({ threadId, after: cursor, limit: 500 });
+          for (const event of page) writeEvent(event);
+          if (page.length < 500) break;
+          cursor = page.at(-1).sequence;
+        }
+        response.write(`event: ready\ndata: ${JSON.stringify({ threadId, busy: orchestrator.activeRuns.has(threadId) })}\n\n`);
         const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15_000);
         request.on('close', () => {
           clearInterval(heartbeat);
           unsubscribe();
         });
         return;
+      }
+      if (parts[0] === 'api' && parts[1] === 'knowledge') {
+        const threadId = requestUrl.searchParams.get('threadId') || undefined;
+        if (threadId) requireThread(threadId);
+        if (method === 'GET' && pathname === '/api/knowledge/search') {
+          sendJson(response, 200, { hits: knowledge.search(requestUrl.searchParams.get('q') ?? '', { threadId, limit: Number(requestUrl.searchParams.get('limit')) || 5 }), method: 'bm25' });
+          return;
+        }
+        if (parts[2] === 'documents' && parts.length === 3) {
+          if (method === 'GET') { sendJson(response, 200, { documents: knowledge.list({ threadId }) }); return; }
+          if (method === 'POST') {
+            const body = await readJson(request);
+            sendJson(response, 201, await knowledge.importDocument(body));
+            return;
+          }
+        }
+        if (parts[2] === 'documents' && parts.length === 4) {
+          if (method === 'GET') { sendJson(response, 200, { document: knowledge.getDocument(parts[3], { threadId }) }); return; }
+          if (method === 'DELETE') {
+            await knowledge.deleteDocument(parts[3], { threadId });
+            sendJson(response, 200, { deleted: true });
+            return;
+          }
+        }
       }
       if (method === 'GET' && pathname === '/api/memories') {
         const query = requestUrl.searchParams.get('q');

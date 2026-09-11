@@ -1,5 +1,7 @@
 # Orbit Agent 架构设计文档
 
+> 版本说明：本文保留基础架构设计记录。v0.3 的会话摘要、文档 RAG、ReAct、PlanExecutor、状态模型与 API 以 [SESSION-RAG-PLANNING.md](SESSION-RAG-PLANNING.md) 和当前源码为准。
+
 ## 1. 文档范围
 
 本文描述 Orbit Agent 运行时的整体结构：分层、模块职责、领域模型、执行生命周期、事件契约、并发与失败模型、容量限额和安全边界。
@@ -9,7 +11,7 @@
 - 想知道「为什么只做这些」→ [`PRODUCT-SCOPE.md`](PRODUCT-SCOPE.md)
 - 想知道「架构调研来源」→ [`ARCHITECTURE-AUDIT.md`](ARCHITECTURE-AUDIT.md)、[`ORIGIN-NOTES.md`](ORIGIN-NOTES.md)
 
-代码规模参考：`src/` 下 9 个模块 + 1 个前端文件，零运行时依赖，Node.js 20+ 直接启动。
+当前运行入口为 `src/server.ts`，使用 Node.js 25+，没有 npm 运行时依赖。
 
 ## 2. 设计目标与非目标
 

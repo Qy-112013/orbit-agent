@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { delimiter, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import type { Agent, ProviderContext, ProviderResult } from './types.ts';
 import type { ProviderAdapter } from './contracts.ts';
+import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, referencedCitations } from './context-format.ts';
 
 export type CliOutputFormat = 'text' | 'json' | 'jsonl';
 export type CliPromptMode = 'argument' | 'stdin';
@@ -65,8 +66,7 @@ function trimOutput(value: string, maxBytes: number): string {
 
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await access(path);
-    return true;
+    return (await stat(path)).isFile();
   } catch {
     return false;
   }
@@ -74,7 +74,7 @@ async function pathExists(path: string): Promise<boolean> {
 
 /**
  * Resolve a command without invoking a shell. npm installs CLI shims as
- * .cmd files on Windows; those shims are converted to a direct node script
+ * .cmd files on Windows; those shims are converted to a direct executable
  * invocation so user-provided prompts never become shell source code.
  */
 async function resolveCommand(command: string, env: NodeJS.ProcessEnv): Promise<{ command: string; prefixArgs: string[] }> {
@@ -83,11 +83,14 @@ async function resolveCommand(command: string, env: NodeJS.ProcessEnv): Promise<
   if (process.platform !== 'win32') return { command: raw, prefixArgs: [] };
 
   const hasPath = raw.includes('\\') || raw.includes('/');
-  const pathEntries = hasPath ? [''] : (env.PATH ?? '').split(delimiter).filter(Boolean);
+  const pathEntries = hasPath ? [''] : (env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean);
   const candidates: string[] = [];
   for (const entry of pathEntries) {
     const base = hasPath ? raw : resolve(entry, raw);
-    candidates.push(base, `${base}.exe`, `${base}.cmd`, `${base}.bat`);
+    // npm also installs an extensionless POSIX launcher. On Windows prefer
+    // executable and cmd shims, while preserving explicitly named files.
+    if (/^\.(exe|cmd|bat)$/i.test(extname(raw))) candidates.push(base);
+    else candidates.push(`${base}.exe`, `${base}.cmd`, `${base}.bat`, base);
   }
   let found: string | undefined;
   for (const candidate of candidates) {
@@ -104,6 +107,11 @@ async function resolveCommand(command: string, env: NodeJS.ProcessEnv): Promise<
   const shim = await readFile(found, 'utf8').catch(() => '');
   const scriptMatch = shim.match(/%dp0%[\\/]([^\"\r\n]+?\.(?:js|cjs|mjs))/i) ?? shim.match(/%~dp0([^\"\r\n]+?\.(?:js|cjs|mjs))/i);
   if (!scriptMatch) {
+    const nativeMatch = shim.match(/"%dp0%[\\/]([^"\r\n]+?\.exe)"[ \t]*%\*/i)
+      ?? shim.match(/"%~dp0([^"\r\n]+?\.exe)"[ \t]*%\*/i);
+    if (nativeMatch) {
+      return { command: resolve(dirname(found), nativeMatch[1].replace(/\\/g, '/')), prefixArgs: [] };
+    }
     throw new CliProviderError(`CLI shim is not a supported Node launcher: ${found}`, { code: 'CLI_UNSUPPORTED_SHIM', provider: 'cli' });
   }
   const scriptPath = resolve(dirname(found), scriptMatch[1].replace(/\\/g, '/'));
@@ -112,14 +120,13 @@ async function resolveCommand(command: string, env: NodeJS.ProcessEnv): Promise<
 
 function composePrompt(agent: Agent, content: string, context: ProviderContext): string {
   const sections = [`You are ${agent.name}, ${agent.role}.`, agent.systemPrompt ? `System instructions:\n${agent.systemPrompt}` : ''];
+  sections.push(EVIDENCE_INSTRUCTIONS);
   if (context.skills?.length) {
     sections.push(`Relevant skills:\n${context.skills.map((skill) => `## ${skill.name}\n${skill.content}`).join('\n\n')}`);
   }
-  if (context.memories?.length) {
-    sections.push(`Relevant memory:\n${context.memories.slice(0, 12).map((memory) => `- ${memory.text}`).join('\n')}`);
-  }
+  sections.push(formatReferenceContext(context));
   if (context.recentMessages?.length) {
-    sections.push(`Recent thread context:\n${context.recentMessages.slice(-8).map((message) => `${message.role}: ${message.content}`).join('\n')}`);
+    sections.push(`Recent thread context:\n${context.recentMessages.map((message) => `${message.role}${message.agentId ? '/' + message.agentId : ''}: ${message.content}`).join('\n')}`);
   }
   sections.push(`User request:\n${content}`);
   return sections.filter(Boolean).join('\n\n');
@@ -282,7 +289,7 @@ export class CliProvider implements ProviderAdapter {
     }
     return {
       content: parsed.content,
-      citations: context.citations?.slice(0, 8) ?? [],
+      citations: referencedCitations(parsed.content, context.citations ?? []),
       provider: this.id,
       model: parsed.model ?? this.options.command,
       usage: parsed.usage ?? null,

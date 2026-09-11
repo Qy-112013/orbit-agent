@@ -32,3 +32,10 @@ test('supports an explicit parallel control tag', () => {
   assert.equal(result.strategy, 'parallel');
   assert.equal(result.targets[0], 'atlas');
 });
+
+test('routes discussion participants and removes controls before model invocation', () => {
+  const result = router.route('#discuss @forge @lens compare risks');
+  assert.equal(result.strategy, 'discuss');
+  assert.deepEqual(result.targets, ['forge', 'lens']);
+  assert.equal(result.cleanContent, 'compare risks');
+});

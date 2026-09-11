@@ -7,7 +7,7 @@
 - 整体结构与边界 → [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - 能力清单与使用方式 → [`CORE-FEATURES.md`](CORE-FEATURES.md)
 
-本文提到的所有行为都在当前代码上实际跑过。§8 的问题清单标注了验证方式，不是纸面推测。
+本文保留早期实现审计，其中 `.mjs` 文件地图、行数和 §8 问题清单对应当时版本。当前 TypeScript 入口、v0.3 新模块、API 与验证方法见 [SESSION-RAG-PLANNING.md](SESSION-RAG-PLANNING.md)。
 
 ## 2. 代码地图
 

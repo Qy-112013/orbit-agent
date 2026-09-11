@@ -1,5 +1,7 @@
 # Orbit Agent 核心功能文档
 
+> 本文记录最初的核心能力。v0.3 新增的持续会话、文档知识库和计划执行，以及当前 TypeScript 模块与 API，见 [SESSION-RAG-PLANNING.md](SESSION-RAG-PLANNING.md)。
+
 ## 1. 文档范围
 
 本文按「能力」组织，说明每项功能解决什么问题、怎么触发、边界行为是什么、以及它由哪些代码支撑。

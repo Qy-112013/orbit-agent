@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { CliProvider, CliProviderError, ClaudeCodeCliProvider, CodexCliProvider, PiCliProvider } from '../src/core/cli-provider.ts';
 import { createProviderRegistryFromEnv } from '../src/core/providers.ts';
 
@@ -96,4 +98,20 @@ test('environment mapping registers Codex, Claude Code and Pi adapters per agent
   assert.ok(ids.includes('atlas'));
   assert.ok(ids.includes('forge'));
   assert.ok(ids.includes('lens'));
+});
+
+test('Windows resolves native npm shims before extensionless POSIX launchers', { skip: process.platform !== 'win32' }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'orbit-native-shim-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'orbit-fixture'), '#!/bin/sh\nexit 1\n');
+  const nativeRelativePath = relative(root, process.execPath).replaceAll('/', '\\');
+  await writeFile(join(root, 'orbit-fixture.cmd'), '@ECHO OFF\r\n"%dp0%\\' + nativeRelativePath + '"   %*\r\n');
+  const provider = new CliProvider({
+    id: 'native-shim-fixture', command: 'orbit-fixture', env: { PATH: root, Path: root },
+    args: ['-e', 'process.stdout.write(JSON.stringify({result:process.argv[1]}))'],
+    cwd: root, workspaceRoot: root, outputFormat: 'json',
+  });
+  const result = await provider.complete({ agent, content: 'literal & | input', context });
+  assert.match(result.content, /literal & \| input/);
+  assert.match(result.content, /User request/);
 });

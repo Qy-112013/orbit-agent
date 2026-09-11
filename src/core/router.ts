@@ -2,8 +2,8 @@ import { STRATEGY, type Strategy } from './types.ts';
 import type { Agent } from './types.ts';
 
 const MENTION_RE = /@([\p{L}\p{N}_-]+)/gu;
-const CONTROL_RE = /(^|\s)#(parallel|serial)\b/iu;
-const CONTROL_RE_GLOBAL = /(^|\s)#(parallel|serial)\b/giu;
+const CONTROL_RE = /(^|\s)#(parallel|serial|discuss|plan)\b/iu;
+const CONTROL_RE_GLOBAL = /(^|\s)#(parallel|serial|discuss|plan)\b/giu;
 const ALL_ALIASES = new Set(['all', 'team', '全体', '所有人']);
 
 function isMentionBoundary(content: string, index: number): boolean {
@@ -59,19 +59,19 @@ export function createRouter(registry: { get(value: unknown): Agent | null; list
       if (targets.length === 0) targets.push(fallback ?? registry.default()?.id);
 
       const explicit = text.match(CONTROL_RE)?.[2]?.toLowerCase() ?? null;
-      const strategy = explicit === STRATEGY.SERIAL
+      const strategy = explicit === STRATEGY.PLAN ? STRATEGY.PLAN : explicit === STRATEGY.DISCUSS ? STRATEGY.DISCUSS : explicit === STRATEGY.SERIAL
         ? STRATEGY.SERIAL
         : explicit === STRATEGY.PARALLEL || broadcast || targets.length > 1
           ? STRATEGY.PARALLEL
           : STRATEGY.SERIAL;
 
       const cleanContent = text
-        .replace(CONTROL_RE_GLOBAL, '$1')
         .replace(MENTION_RE, (full, token, offset) => {
           if (!isMentionBoundary(text, Number(offset))) return full;
           if (ALL_ALIASES.has(String(token).toLowerCase()) || registry.get(token)) return '';
           return full;
         })
+        .replace(CONTROL_RE_GLOBAL, '$1')
         .replace(/[ \t]{2,}/g, ' ')
         .replace(/\n{3,}/g, '\n\n')
         .trim() || text;

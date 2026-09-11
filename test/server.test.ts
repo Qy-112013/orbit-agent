@@ -21,6 +21,8 @@ test('serves health, bootstrap and a complete message turn', async (t) => {
   assert.equal(health.ok, true);
   const bootstrap = await fetch(`${base}/api/bootstrap`).then((response) => response.json());
   assert.ok(bootstrap.agents.length >= 3);
+  assert.equal(bootstrap.collaboration.maxDelegations, 2);
+  assert.equal(bootstrap.execution.maxSteps, 5);
   const threadId = bootstrap.threads[0].id;
   const turnResponse = await fetch(`${base}/api/threads/${threadId}/messages`, {
     method: 'POST',
@@ -33,6 +35,7 @@ test('serves health, bootstrap and a complete message turn', async (t) => {
   assert.equal(turn.messages.length, 1);
   const events = await fetch(`${base}/api/threads/${threadId}/events`).then((response) => response.json());
   assert.ok(events.events.some((event) => event.type === 'execution.completed'));
+  assert.ok(events.events.some((event) => event.type === 'agent.step.completed'));
   const taskResponse = await fetch(`${base}/api/tasks`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

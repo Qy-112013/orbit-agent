@@ -1,5 +1,15 @@
 data/state.json
 data/state.json.*.tmp
+data/mcp-state.json
+data/mcp-state.json.*.tmp
 *.log
 node_modules/
+.orbit-artifacts/
 
+# Local-only personal notes
+/docs/RESUME-BULLET.md
+/docs/private/
+/docs/*INTERVIEW*.md
+/docs/*interview*.md
+/docs/*简历*.md
+/docs/*面试*.md

@@ -28,6 +28,8 @@
         <nav class="nav-list" aria-label="主导航">
           <button class="nav-item active" type="button" data-view="threads"><span class="nav-icon">▦</span> Threads <span class="nav-count" id="thread-count">0</span></button>
           <button class="nav-item" type="button" data-view="memory"><span class="nav-icon">⌁</span> Memory <span class="nav-count" id="memory-count">0</span></button>
+          <button class="nav-item" type="button" data-view="knowledge"><span class="nav-icon">▤</span> Knowledge <span class="nav-count" id="knowledge-count">0</span></button>
+          <button class="nav-item" type="button" data-view="plans"><span class="nav-icon">⇢</span> Plans <span class="nav-count" id="plan-count">0</span></button>
           <button class="nav-item" type="button" data-view="tasks"><span class="nav-icon">✓</span> Tasks <span class="nav-count" id="task-count">0</span></button>
         </nav>
 
@@ -35,11 +37,12 @@
         <div class="agent-list" id="agent-list"></div>
 
         <div class="sidebar-section-label thread-label">RECENT THREADS</div>
+        <div class="thread-filters"><input id="thread-search" type="search" placeholder="搜索会话与消息" aria-label="搜索会话与消息" maxlength="200" /><label><input id="show-archived" type="checkbox" /> 已归档</label></div>
         <div class="thread-list" id="thread-list" role="list"></div>
 
         <div class="sidebar-footer">
           <div class="provider-pill"><span class="status-dot online"></span><span id="provider-label">Local demo provider</span></div>
-          <div class="version-label">v0.1 · focused runtime</div>
+          <div class="version-label">v0.3 · focused runtime</div>
         </div>
       </aside>
 
@@ -58,6 +61,7 @@
             <div class="eyebrow">ACTIVE THREAD <span id="thread-id-label"></span></div>
             <h1 id="thread-title">Loading…</h1>
             <p id="thread-subtitle">选择一个 Agent，或在消息中使用 @mention 进行协作。</p>
+            <div class="thread-actions"><button class="text-button" id="rename-thread" type="button">重命名</button><button class="text-button" id="fork-thread" type="button">创建分支</button><button class="text-button" id="archive-thread" type="button">归档</button></div>
           </div>
           <div class="thread-metrics">
             <div class="metric"><span class="metric-value" id="message-metric">0</span><span class="metric-label">messages</span></div>
@@ -67,6 +71,11 @@
 
         <div class="content-grid">
           <section class="conversation-panel" aria-label="对话">
+            <details class="context-summary hidden" id="context-summary"><summary id="context-summary-label">历史摘录</summary><p>较早消息的有损摘录；结论以原始消息和证据为准。</p><pre id="context-summary-text"></pre></details>
+            <section class="inspector-card plan-panel" id="plan-panel" aria-label="执行计划">
+              <div class="card-heading"><div><span class="card-kicker">PLAN · EXECUTE · REVIEW</span><h2>执行计划</h2></div><select id="plan-select" aria-label="选择历史计划" class="hidden"></select></div>
+              <div id="plan-list" class="plan-list"><div class="empty-state compact">需要拆分工作时，选择下方“计划与复核”模式。普通对话仍由当前 Agent 处理。</div></div>
+            </section>
             <div class="timeline" id="timeline" aria-live="polite"></div>
             <div class="run-indicator hidden" id="run-indicator"><span class="pulse"></span><span id="run-label">Agents are thinking…</span></div>
             <form class="composer" id="composer">
@@ -76,13 +85,19 @@
               </div>
               <textarea id="message-input" rows="3" maxlength="30000" placeholder="描述一个问题，或使用 @atlas / @forge / @lens 指定 Agent…" required></textarea>
               <div class="composer-footer">
-                <div class="composer-mode"><span class="mode-dot"></span> orchestrated turn <span class="mode-separator">·</span> context + memory enabled</div>
+                <label class="composer-mode" for="execution-mode">执行方式 <select id="execution-mode"><option value="chat">普通对话</option><option value="plan">计划与复核</option><option value="discuss">两轮讨论</option></select></label>
                 <button class="send-button" id="send-button" type="submit"><span>发送</span><span class="send-arrow">↗</span></button>
               </div>
             </form>
           </section>
 
           <aside class="inspector" aria-label="执行检查器">
+            <div class="inspector-card knowledge-card" id="knowledge-panel">
+              <div class="card-heading"><div><span class="card-kicker">SOURCES</span><h2>知识库</h2></div><button class="text-button" id="import-knowledge" type="button">＋ 导入文档</button></div>
+              <form class="knowledge-search" id="knowledge-search"><input id="knowledge-query" type="search" placeholder="检索文档片段" maxlength="2000" aria-label="知识库查询" /><button class="text-button" type="submit">检索</button></form>
+              <div id="knowledge-results" class="knowledge-results"></div>
+              <div id="knowledge-documents" class="knowledge-documents"><div class="empty-state compact">导入 TXT 或 Markdown，回答时可引用原文。</div></div>
+            </div>
             <div class="inspector-card trace-card">
               <div class="card-heading"><div><span class="card-kicker">OBSERVABILITY</span><h2>Execution trace</h2></div><span class="live-badge"><span class="status-dot online"></span> LIVE</span></div>
               <div class="trace-list" id="trace-list"><div class="empty-state compact">发送一条消息后，这里会显示路由、记忆检索和 Agent 执行轨迹。</div></div>
@@ -99,6 +114,18 @@
         </div>
       </main>
     </div>
+    <dialog id="thread-dialog" class="app-dialog"><form id="thread-form"><div class="dialog-heading"><h2 id="thread-dialog-title">重命名会话</h2><button class="icon-button" type="button" data-close="thread-dialog" aria-label="关闭">×</button></div><label>会话标题<input id="thread-name" required maxlength="120" /></label><div class="dialog-actions"><button class="primary-button" type="submit">保存</button></div></form></dialog>
+    <dialog id="knowledge-dialog" class="app-dialog"><form id="knowledge-form">
+      <div class="dialog-heading"><h2>导入知识文档</h2><button class="icon-button" type="button" data-close="knowledge-dialog" aria-label="关闭">×</button></div>
+      <label>TXT / Markdown 文件<input id="knowledge-file" type="file" accept=".txt,.md,.markdown,text/plain,text/markdown" /></label>
+      <label>标题<input id="knowledge-title" required maxlength="200" placeholder="例如：项目部署说明" /></label>
+      <label>来源说明<input id="knowledge-source" maxlength="1000" placeholder="文件名、文档版本或来源地址" /></label>
+      <label>使用范围<select id="knowledge-scope"><option value="thread">当前会话</option><option value="workspace">整个工作区</option></select></label>
+      <label>正文<textarea id="knowledge-content" rows="10" required maxlength="200000" placeholder="选择文件，或直接粘贴正文。最多 20 万字符。"></textarea></label>
+      <p class="form-hint">导入后可检索原文并查看引用来源。当前会话的文档仅用于这条会话。</p>
+      <div class="dialog-actions"><button class="primary-button" id="knowledge-save" type="submit">导入</button></div>
+    </form></dialog>
+    <dialog id="source-dialog" class="app-dialog source-dialog"><div class="dialog-heading"><h2 id="source-title">原文</h2><button class="icon-button" type="button" data-close="source-dialog" aria-label="关闭">×</button></div><p id="source-meta" class="form-hint"></p><pre id="source-text"></pre></dialog>
     <div class="toast-region" id="toast-region" aria-live="assertive"></div>
     <script type="module" src="/app.js"></script>
   </body>

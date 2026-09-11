@@ -3,8 +3,10 @@ import { dirname, resolve } from 'node:path';
 import { id } from './ids.ts';
 import { nowIso, ROLE, asNonEmptyString, clamp, type Agent, type ExecutionEvent, type Memory, type Message, type Role, type Task, type Thread } from './types.ts';
 import type { StoragePort } from './contracts.ts';
+import type { ExecutionPlan, KnowledgeChunk, KnowledgeDocument } from './types.ts';
+import { conversationContext } from './conversation.ts';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MAX_EVENTS = 1200;
 const MAX_MESSAGES_PER_THREAD = 500;
 
@@ -22,6 +24,9 @@ interface StoreState {
   tasks: Task[];
   events: ExecutionEvent[];
   eventSequence: number;
+  documents: KnowledgeDocument[];
+  chunks: KnowledgeChunk[];
+  plans: ExecutionPlan[];
 }
 
 function emptyState(): StoreState {
@@ -36,6 +41,9 @@ function emptyState(): StoreState {
     tasks: [],
     events: [],
     eventSequence: 0,
+    documents: [],
+    chunks: [],
+    plans: [],
   };
 }
 
@@ -48,7 +56,7 @@ function normalizeState(candidate: unknown): StoreState {
     schemaVersion: SCHEMA_VERSION,
     meta: { ...base.meta, ...(candidate.meta ?? {}) },
   };
-  for (const key of ['agents', 'threads', 'messages', 'memories', 'tasks', 'events']) {
+  for (const key of ['agents', 'threads', 'messages', 'memories', 'tasks', 'events', 'documents', 'chunks', 'plans']) {
     if (!Array.isArray(state[key])) state[key] = [];
   }
   if (!Number.isInteger(state.eventSequence) || state.eventSequence < 0) {
@@ -93,8 +101,20 @@ export class JsonStore implements StoragePort {
     for (const agent of this.seedAgents) {
       if (!known.has(agent.id)) this.state.agents.push(clone(agent));
     }
+    let recovered = false;
+    for (const plan of this.state.plans) {
+      if (['planning', 'running', 'reviewing', 'replanning'].includes(plan.status)) {
+        plan.status = 'interrupted';
+        plan.outcome = '服务在执行期间重启；结果可能不完整，请检查已保留的步骤后重新规划。';
+        plan.updatedAt = nowIso();
+        for (const step of plan.revisions.at(-1)?.steps ?? []) {
+          if (step.status === 'running') step.status = 'failed';
+        }
+        recovered = true;
+      }
+    }
     this.ready = true;
-    if (this.state.agents.length !== known.size || this.state.meta.updatedAt === undefined) {
+    if (recovered || this.state.agents.length !== known.size || this.state.meta.updatedAt === undefined) {
       await this.persist();
     }
     return this;
@@ -162,6 +182,7 @@ export class JsonStore implements StoragePort {
         createdAt: nowIso(),
         updatedAt: nowIso(),
         messageCount: 0,
+        archived: false,
         metadata: { ...metadata },
       };
       state.threads.unshift(thread);
@@ -178,10 +199,50 @@ export class JsonStore implements StoragePort {
     return { ...clone(thread), messages: clone(messages) };
   }
 
-  listThreads(): Thread[] {
+  listThreads({ query = '', archived = false }: { query?: string; archived?: boolean } = {}): Thread[] {
+    const needle = query.trim().toLowerCase();
     return clone(
-      [...this.state.threads].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))),
+      this.state.threads.filter((thread) => Boolean(thread.archived) === archived && (!needle
+        || thread.title.toLowerCase().includes(needle)
+        || this.state.messages.some((message) => message.threadId === thread.id && message.content.toLowerCase().includes(needle))))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))),
     );
+  }
+
+  async updateThread(threadId: string, patch: { title?: string; archived?: boolean }): Promise<Thread> {
+    if (patch.title === undefined && patch.archived === undefined) throw Object.assign(new Error('provide title or archived'), { code: 'VALIDATION_ERROR' });
+    const title = patch.title === undefined ? undefined : asNonEmptyString(patch.title, 'title').slice(0, 120);
+    if (patch.archived !== undefined && typeof patch.archived !== 'boolean') throw Object.assign(new Error('archived must be boolean'), { code: 'VALIDATION_ERROR' });
+    return this.mutate((state) => {
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+      if (title !== undefined) thread.title = title;
+      if (patch.archived !== undefined) thread.archived = patch.archived;
+      thread.updatedAt = nowIso();
+      return thread;
+    });
+  }
+
+  async forkThread(threadId: string, { messageId, title }: { messageId?: string; title?: string } = {}): Promise<Thread> {
+    return this.mutate((state) => {
+      const source = state.threads.find((item) => item.id === threadId);
+      if (!source) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+      const history = state.messages.filter((message) => message.threadId === threadId);
+      const boundary = messageId ? history.find((message) => message.id === messageId) : history.at(-1);
+      if (messageId && !boundary) throw Object.assign(new Error('branch message not found in this thread'), { code: 'NOT_FOUND' });
+      const selected = history.filter((message) => message.sequence <= (boundary?.sequence ?? 0));
+      const thread: Thread = {
+        id: id('thr'), title: title === undefined ? `${source.title} · 分支`.slice(0, 120) : asNonEmptyString(title, 'title').slice(0, 120),
+        activeAgentId: [...selected].reverse().find((message) => message.agentId)?.agentId ?? state.agents[0]?.id ?? null,
+        createdAt: nowIso(), updatedAt: nowIso(), messageCount: selected.length, archived: false,
+        metadata: { parentThreadId: threadId, forkMessageId: boundary?.id ?? null },
+        ...(source.summary && source.summary.throughSequence <= (boundary?.sequence ?? 0) ? { summary: clone(source.summary) } : {}),
+      };
+      state.threads.unshift(thread);
+      state.messages.push(...selected.map((message) => ({ ...clone(message), id: id('msg'), threadId: thread.id,
+        metadata: { ...clone(message.metadata), originalMessageId: message.id } })));
+      return thread;
+    });
   }
 
   async touchThread(threadId: string, patch: Partial<Thread> = {}): Promise<Thread | null> {
@@ -209,6 +270,9 @@ export class JsonStore implements StoragePort {
         throw error;
       }
       const prior = state.messages.filter((message) => message.threadId === threadId);
+      // Check inside the serialized mutation: archiving can win the race
+      // between route validation and this queued write.
+      if (role === ROLE.USER && thread.archived) throw Object.assign(new Error('thread is archived'), { code: 'CONFLICT' });
       const message = {
         id: id('msg'),
         threadId,
@@ -226,6 +290,8 @@ export class JsonStore implements StoragePort {
       // Keep durable state bounded while preserving the latest conversation.
       const threadMessages = state.messages.filter((item) => item.threadId === threadId);
       if (threadMessages.length > MAX_MESSAGES_PER_THREAD) {
+        const { summary } = conversationContext({ ...thread, messages: threadMessages });
+        if (summary) thread.summary = summary;
         const remove = new Set(threadMessages.slice(0, threadMessages.length - MAX_MESSAGES_PER_THREAD).map((item) => item.id));
         state.messages = state.messages.filter((item) => !remove.has(item.id));
         thread.messageCount = MAX_MESSAGES_PER_THREAD;
@@ -319,9 +385,68 @@ export class JsonStore implements StoragePort {
     });
   }
 
-  listEvents({ threadId, after = 0, limit = 200 }: { threadId?: string; after?: number; limit?: number } = {}): ExecutionEvent[] {
+  listEvents({ threadId, after = 0, limit = 200, latest = false }: { threadId?: string; after?: number; limit?: number; latest?: boolean } = {}): ExecutionEvent[] {
     const rows = this.state.events.filter((event) => (!threadId || event.threadId === threadId) && event.sequence > Number(after));
-    return clone(rows.slice(0, clamp(Number(limit) || 200, 1, 500)));
+    const count = clamp(Number(limit) || 200, 1, 500);
+    return clone(latest ? rows.slice(-count) : rows.slice(0, count));
+  }
+
+  listKnowledgeDocuments({ threadId }: { threadId?: string } = {}): KnowledgeDocument[] {
+    return clone(this.state.documents.filter((document) => !document.threadId || document.threadId === threadId));
+  }
+
+  listKnowledgeChunks(documentIds: string[]): KnowledgeChunk[] {
+    const allowed = new Set(documentIds);
+    return clone(this.state.chunks.filter((chunk) => allowed.has(chunk.documentId)));
+  }
+
+  async saveKnowledgeDocument(document: KnowledgeDocument, chunks: KnowledgeChunk[]): Promise<{ document: KnowledgeDocument; duplicate: boolean }> {
+    return this.mutate((state) => {
+      if (document.threadId && !state.threads.some((thread) => thread.id === document.threadId)) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+      const duplicate = state.documents.find((item) => item.contentHash === document.contentHash && item.threadId === document.threadId);
+      if (duplicate) return { document: duplicate, duplicate: true };
+      if (state.documents.length >= 100 || state.documents.reduce((sum, item) => sum + item.content.length, document.content.length) > 5_000_000) {
+        throw Object.assign(new Error('知识库容量上限为 100 个文档、共 500 万字符，请先移除不再使用的文档。'), { code: 'VALIDATION_ERROR' });
+      }
+      state.documents.unshift(clone(document));
+      state.chunks.push(...clone(chunks));
+      return { document, duplicate: false };
+    });
+  }
+
+  async deleteKnowledgeDocument(documentId: string, { threadId }: { threadId?: string } = {}): Promise<void> {
+    await this.mutate((state) => {
+      const document = state.documents.find((item) => item.id === documentId && (!item.threadId || item.threadId === threadId));
+      if (!document) throw Object.assign(new Error('document not found'), { code: 'NOT_FOUND' });
+      state.documents = state.documents.filter((item) => item.id !== documentId);
+      state.chunks = state.chunks.filter((item) => item.documentId !== documentId);
+    });
+  }
+
+  async savePlan(plan: ExecutionPlan): Promise<ExecutionPlan> {
+    return this.mutate((state) => {
+      if (!state.threads.some((thread) => thread.id === plan.threadId)) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+      const index = state.plans.findIndex((item) => item.id === plan.id);
+      const saved = { ...clone(plan), updatedAt: nowIso() };
+      if (index >= 0) state.plans[index] = saved;
+      else {
+        if (state.plans.length >= 100) {
+          const removable = state.plans.findLastIndex((item) => ['completed', 'blocked', 'interrupted'].includes(item.status));
+          if (removable < 0) throw Object.assign(new Error('too many active plans'), { code: 'CONFLICT' });
+          state.plans.splice(removable, 1);
+        }
+        state.plans.unshift(saved);
+      }
+      return saved;
+    });
+  }
+
+  listPlans({ threadId }: { threadId?: string } = {}): ExecutionPlan[] {
+    return clone(this.state.plans.filter((plan) => !threadId || plan.threadId === threadId));
+  }
+
+  getPlan(planId: string): ExecutionPlan | null {
+    return clone(this.state.plans.find((plan) => plan.id === planId) ?? null);
   }
 
   stats(): Record<string, number> {
@@ -332,6 +457,9 @@ export class JsonStore implements StoragePort {
       memories: this.state.memories.length,
       tasks: this.state.tasks.filter((task) => task.status !== 'done').length,
       events: this.state.events.length,
+      documents: this.state.documents.length,
+      chunks: this.state.chunks.length,
+      plans: this.state.plans.length,
     };
   }
 }

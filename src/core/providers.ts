@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, referencedCitations } from './context-format.ts';
 
 function lastUserMessage(messages = []) {
   return [...messages].reverse().find((message) => message.role === 'user')?.content ?? '';
@@ -8,11 +9,11 @@ function contextHint(context) {
   const memoryLine = context?.memories?.length
     ? `检索到 ${context.memories.length} 条相关记忆：${context.memories
         .slice(0, 3)
-        .map((memory) => `「${memory.text.slice(0, 80)}」`)
+        .map((memory) => `「${memory.text.slice(0, 80)}」[${memory.citation ?? 'memory:' + memory.id}]`)
         .join('、')}`
     : '当前没有命中的长期记忆。';
   const turnCount = context?.recentMessages?.length ?? 0;
-  return `${memoryLine} 当前线程提供了 ${turnCount} 条最近消息作为上下文。`;
+  return `${memoryLine} 当前线程提供了 ${turnCount} 条最近消息${context.summary ? '及历史摘录' : ''}作为上下文。`;
 }
 
 function recentConversation(context) {
@@ -22,7 +23,7 @@ function recentConversation(context) {
     .join('\n');
 }
 
-import type { Agent, ProviderContext, ProviderResult } from './types.ts';
+import type { Agent, ProviderContext, ProviderInput, ProviderResult } from './types.ts';
 import type { ProviderAdapter } from './contracts.ts';
 import { createCliProvider, defaultCliCwd, type CliProvider } from './cli-provider.ts';
 
@@ -39,6 +40,13 @@ export class LocalProvider implements ProviderAdapter {
     if (this.latencyMs > 0) await delay(this.latencyMs);
     const prompt = String(content ?? '').trim();
     const role = agent?.role ?? 'Agent';
+    if (context.workflow?.kind === 'planning') {
+      return { content: JSON.stringify({ steps: [{ id: 'collect', title: '收集与目标相关的证据', owner: context.workflow.participants[0], dependsOn: [], acceptance: '提供可核对的来源和结论' }] }),
+        provider: 'local', model: 'deterministic-v1', metadata: { demo: true } };
+    }
+    if (context.workflow?.kind === 'review') {
+      return { content: JSON.stringify({ verdict: 'blocked', feedback: '本地演示模型不能验证任务是否完成，请配置真实 Provider。' }), provider: 'local', model: 'deterministic-v1', metadata: { demo: true } };
+    }
     let body;
     if (/架构|设计|拆解|方案|architecture|design/i.test(prompt)) {
       body = [
@@ -61,9 +69,11 @@ export class LocalProvider implements ProviderAdapter {
         '下一步：确认验收标准，并把结果拆成可以单独验证的小任务。',
       ].join('\n');
     }
+    const evidence = (context.knowledge ?? []).slice(0, 2).map((hit) => `检索原文「${hit.text.slice(0, 240)}」[${hit.citation.id}]`).join('\n\n');
+    const answer = `${body}\n\n> ${contextHint(context)}${evidence ? '\n\n' + evidence : ''}\n\n（当前使用 LocalProvider；上述为演示回答和检索片段，配置真实模型后可进行分析。）`;
     return {
-      content: `${body}\n\n> ${contextHint(context)}\n\n（当前使用 LocalProvider；配置 OpenAI 兼容接口后可切换真实模型。）`,
-      citations: context?.citations?.slice(0, 4) ?? [],
+      content: answer,
+      citations: referencedCitations(answer, context?.citations ?? []),
       provider: 'local',
       model: 'deterministic-v1',
       usage: { promptTokens: Math.ceil(prompt.length / 4), completionTokens: Math.ceil(body.length / 4) },
@@ -85,28 +95,35 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
     this.timeoutMs = timeoutMs;
   }
 
-  async complete({ agent, content, context }: { agent: Agent; content: string; context: ProviderContext }): Promise<ProviderResult> {
+  async complete({ agent, content, context, tools = [], transcript = [] }: ProviderInput): Promise<ProviderResult> {
     if (!this.apiKey) throw new Error('OPENAI_API_KEY is not configured');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const messages = [
-      { role: 'system', content: agent?.systemPrompt ?? 'You are a helpful assistant.' },
-      {
-        role: 'user',
-        content: [
-          content,
-          recentConversation(context) ? `\n\nRecent thread context:\n${recentConversation(context)}` : '',
-          context?.memories?.length
-            ? `\nRelevant memory:\n${context.memories.map((memory) => `- ${memory.text}`).join('\n')}`
-            : '',
-        ].join(''),
-      },
+      { role: 'system', content: [
+        agent?.systemPrompt ?? 'You are a helpful assistant.',
+        ...(context.skills ?? []).map((skill) => `Skill: ${skill.name}\n${skill.content}`),
+        EVIDENCE_INSTRUCTIONS,
+      ].join('\n\n') },
+      ...(formatReferenceContext(context) ? [{ role: 'user', content: `Reference context:\n${formatReferenceContext(context)}` }] : []),
+      ...(context.recentMessages ?? []).map((message) => ({
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: `${message.agentId ? '[' + message.agentId + '] ' : message.role === 'system' ? '[Thread note] ' : ''}${message.content}`,
+      })),
+      { role: 'user', content },
+      ...transcript.map((message) => message.role === 'tool'
+        ? { role: 'tool', tool_call_id: message.toolCallId, content: message.content }
+        : { role: 'assistant', content: message.content || null,
+          ...(typeof message.reasoningContent === 'string' ? { reasoning_content: message.reasoningContent } : {}),
+          tool_calls: message.toolCalls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })) }),
     ];
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: this.model, messages, temperature: 0.2 }),
+        body: JSON.stringify({ model: this.model, messages, temperature: 0.2,
+          ...(tools.length ? { tools: tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })), tool_choice: 'auto' } : {}),
+        }),
         signal: controller.signal,
       });
       const payload = await response.json().catch(() => ({}));
@@ -115,10 +132,21 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
       const text = Array.isArray(contentValue)
         ? contentValue.map((part) => part?.text ?? '').join('')
         : String(contentValue ?? '');
-      if (!text.trim()) throw new Error('provider returned an empty message');
+      const rawCalls = payload?.choices?.[0]?.message?.tool_calls ?? [];
+      if (!Array.isArray(rawCalls)) throw new Error('provider returned invalid tool calls');
+      const toolCalls = rawCalls.map((call) => {
+        if (call?.type !== 'function' || typeof call.id !== 'string' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string') {
+          throw new Error('provider returned an invalid function call');
+        }
+        return { id: call.id, name: call.function.name, arguments: call.function.arguments };
+      });
+      if (!text.trim() && !toolCalls.length) throw new Error('provider returned an empty message');
       return {
         content: text.trim(),
-        citations: context?.citations?.slice(0, 8) ?? [],
+        ...(typeof payload?.choices?.[0]?.message?.reasoning_content === 'string'
+          ? { reasoningContent: payload.choices[0].message.reasoning_content } : {}),
+        ...(toolCalls.length ? { toolCalls } : {}),
+        citations: referencedCitations(text, context?.citations ?? []),
         provider: 'openai-compatible',
         model: payload?.model ?? this.model,
         usage: payload?.usage ?? null,
@@ -141,7 +169,7 @@ export class FallbackProvider implements ProviderAdapter {
     this.id = primary?.id ? `${primary.id}-with-local-fallback` : 'fallback';
   }
 
-  async complete(input: { agent: Agent; content: string; context: ProviderContext }): Promise<ProviderResult> {
+  async complete(input: ProviderInput): Promise<ProviderResult> {
     if (!this.primary) return this.fallback.complete(input);
     try {
       const result = await this.primary.complete(input);
@@ -189,7 +217,7 @@ export class ProviderRegistry implements ProviderAdapter {
     return [...this.providers.entries()].map(([id, provider]) => ({ id, adapter: provider.id ?? provider.constructor.name, default: id === this.defaultId }));
   }
 
-  async complete(input: { agent: Agent; content: string; context: ProviderContext }): Promise<ProviderResult> {
+  async complete(input: ProviderInput): Promise<ProviderResult> {
     const selected = this.resolve(input.agent);
     const result = await selected.provider.complete(input);
     return { ...result, provider: result.provider ?? selected.id };

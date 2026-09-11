@@ -1,16 +1,19 @@
 {
   "name": "orbit-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "A focused, self-hosted and observable multi-agent workspace",
   "engines": {
-    "node": ">=20"
+    "node": ">=25"
   },
   "scripts": {
     "start": "node --experimental-strip-types src/server.ts",
     "dev": "node --watch --experimental-strip-types src/server.ts",
     "mcp": "node --experimental-strip-types src/mcp-server.ts",
+    "demo:collaboration": "node --experimental-strip-types scripts/demo-collaboration.ts",
+    "demo:workflow": "node --experimental-strip-types scripts/demo-workflow.ts",
+    "check:ui": "node --experimental-strip-types scripts/check-ui.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "node --experimental-strip-types scripts/check-syntax.mjs"
   }
