@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { id } from './ids.ts';
 import { nowIso, ROLE, asNonEmptyString, clamp, type Agent, type ExecutionEvent, type Memory, type Message, type Role, type Task, type Thread } from './types.ts';
 import type { StoragePort } from './contracts.ts';
-import type { ExecutionPlan, KnowledgeChunk, KnowledgeDocument } from './types.ts';
+import { NATIVE_SESSION_ID, type ExecutionPlan, type KnowledgeChunk, type KnowledgeDocument, type NativeAgentSession } from './types.ts';
 import { conversationContext } from './conversation.ts';
 
 const SCHEMA_VERSION = 2;
@@ -251,6 +251,31 @@ export class JsonStore implements StoragePort {
       if (!thread) return null;
       Object.assign(thread, patch, { updatedAt: nowIso() });
       return thread;
+    });
+  }
+
+  async saveAgentSession(threadId: string, agentId: string, session: NativeAgentSession): Promise<NativeAgentSession> {
+    if (!['codex', 'claude-code'].includes(session.provider) || !NATIVE_SESSION_ID.test(session.sessionId) || !/^[a-f0-9]{64}$/.test(session.profile)) {
+      throw Object.assign(new Error('invalid native session binding'), { code: 'VALIDATION_ERROR' });
+    }
+    return this.mutate((state) => {
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+      if (!state.agents.some((agent) => agent.id === agentId)) throw Object.assign(new Error('agent not found'), { code: 'NOT_FOUND' });
+      const saved = { provider: session.provider, sessionId: session.sessionId, profile: session.profile, updatedAt: nowIso() };
+      thread.agentSessions ??= {};
+      thread.agentSessions[agentId] = saved;
+      thread.updatedAt = saved.updatedAt;
+      return saved;
+    });
+  }
+
+  async resetAgentSession(threadId: string, agentId: string): Promise<void> {
+    await this.mutate((state) => {
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
+      if (thread.agentSessions) delete thread.agentSessions[agentId];
+      thread.updatedAt = nowIso();
     });
   }
 

@@ -1,9 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { delimiter, dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import type { Agent, ProviderContext, ProviderResult } from './types.ts';
 import type { ProviderAdapter } from './contracts.ts';
 import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, referencedCitations } from './context-format.ts';
+import { NATIVE_SESSION_ID } from './types.ts';
 
 export type CliOutputFormat = 'text' | 'json' | 'jsonl';
 export type CliPromptMode = 'argument' | 'stdin';
@@ -19,6 +21,7 @@ export interface CliProviderOptions {
   env?: Record<string, string>;
   outputFormat?: CliOutputFormat;
   promptMode?: CliPromptMode;
+  nativeSessions?: boolean;
 }
 
 export interface CliInvocation {
@@ -194,6 +197,10 @@ function parseCodex(raw: string, format: CliOutputFormat): ParsedCliOutput {
   for (const item of records) {
     if (!item || typeof item !== 'object') continue;
     const record = item as Record<string, unknown>;
+    if (record.type === 'thread.started' && typeof record.thread_id === 'string') parsed.sessionId = record.thread_id;
+    if (record.type === 'turn.failed' || record.type === 'error') {
+      throw new CliProviderError(`Codex reported a failed turn: ${JSON.stringify(record.error ?? record.message ?? 'unknown error').slice(0, 600)}`, { code: 'CLI_RESULT_ERROR', provider: 'codex' });
+    }
     if (record.type === 'item.completed' && record.item && typeof record.item === 'object') {
       const inner = record.item as Record<string, unknown>;
       if (inner.type === 'agent_message') {
@@ -216,6 +223,9 @@ function parseClaude(raw: string, format: CliOutputFormat): ParsedCliOutput {
   for (const item of records) {
     if (!item || typeof item !== 'object') continue;
     const record = item as Record<string, unknown>;
+    if (record.type === 'result' && record.is_error === true) {
+      throw new CliProviderError(`Claude Code reported a failed turn: ${String(record.result ?? record.subtype ?? 'unknown error').slice(0, 600)}`, { code: 'CLI_RESULT_ERROR', provider: 'claude-code' });
+    }
     if (record.type === 'result' && typeof record.result === 'string') finalText = record.result;
     if (record.type === 'stream_event' && record.event && typeof record.event === 'object') {
       const event = record.event as Record<string, unknown>;
@@ -245,7 +255,9 @@ export class CliProvider implements ProviderAdapter {
     this.options = { timeoutMs: 120_000, maxOutputBytes: 2_000_000, outputFormat: 'text', promptMode: 'argument', ...options };
   }
 
-  protected buildInvocation(prompt: string): CliInvocation {
+  protected canResume(): boolean { return false; }
+
+  protected buildInvocation(prompt: string, _sessionId?: string): CliInvocation {
     const args = [...(this.options.args ?? [])];
     if (this.options.promptMode === 'stdin') return { command: this.options.command, args, cwd: this.options.cwd ?? process.cwd(), promptMode: 'stdin' };
     args.push(prompt);
@@ -258,7 +270,7 @@ export class CliProvider implements ProviderAdapter {
 
   async complete({ agent, content, context }: { agent: Agent; content: string; context: ProviderContext }): Promise<ProviderResult> {
     const prompt = composePrompt(agent, content, context);
-    const invocation = this.buildInvocation(prompt);
+    let invocation = this.buildInvocation(prompt);
     const workspaceRoot = this.options.workspaceRoot ? resolve(this.options.workspaceRoot) : undefined;
     const cwd = resolve(invocation.cwd);
     if (workspaceRoot && !isInside(workspaceRoot, cwd)) {
@@ -266,6 +278,13 @@ export class CliProvider implements ProviderAdapter {
     }
     const env: NodeJS.ProcessEnv = { ...process.env, ...(this.options.env ?? {}) };
     const resolved = await resolveCommand(invocation.command, env);
+    const nativeEnabled = this.options.nativeSessions !== false && this.canResume();
+    const profile = createHash('sha256').update(JSON.stringify({ provider: this.id, command: resolved.command,
+      args: [...resolved.prefixArgs, ...(this.options.args ?? [])], cwd, agentId: agent.id, role: agent.role, systemPrompt: agent.systemPrompt ?? '' })).digest('hex');
+    const binding = context.nativeSession;
+    const resumeId = nativeEnabled && binding?.provider === this.id && binding.profile === profile && NATIVE_SESSION_ID.test(binding.sessionId)
+      ? binding.sessionId : undefined;
+    if (resumeId) invocation = this.buildInvocation(prompt, resumeId);
     const child = spawn(resolved.command, [...resolved.prefixArgs, ...invocation.args], {
       cwd,
       env,
@@ -293,7 +312,12 @@ export class CliProvider implements ProviderAdapter {
       provider: this.id,
       model: parsed.model ?? this.options.command,
       usage: parsed.usage ?? null,
-      metadata: { command: this.options.command, cwd, ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}) },
+      metadata: { command: this.options.command, cwd, ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
+        ...(nativeEnabled && parsed.sessionId && NATIVE_SESSION_ID.test(parsed.sessionId) ? {
+          nativeSession: { provider: this.id, sessionId: parsed.sessionId, profile },
+          sessionResumed: resumeId === parsed.sessionId,
+        } : {}),
+      },
     };
   }
 }
@@ -324,6 +348,15 @@ export class CodexCliProvider extends CliProvider {
   constructor(options: Partial<CliProviderOptions> = {}) {
     super({ id: 'codex', command: 'codex', args: ['exec', '--json'], outputFormat: 'jsonl', promptMode: 'argument', ...options });
   }
+  protected canResume(): boolean {
+    const args = this.options.args ?? [];
+    return this.id === 'codex' && args.includes('exec') && !args.includes('resume') && !args.includes('--last') && !args.includes('--ephemeral');
+  }
+  protected buildInvocation(prompt: string, sessionId?: string): CliInvocation {
+    const invocation = super.buildInvocation(prompt);
+    if (sessionId) invocation.args.splice(invocation.args.indexOf('exec') + 1, 0, 'resume', sessionId);
+    return invocation;
+  }
   protected parseOutput(raw: string): ParsedCliOutput { return parseCodex(raw, this.options.outputFormat ?? 'jsonl'); }
 }
 
@@ -331,8 +364,13 @@ export class ClaudeCodeCliProvider extends CliProvider {
   constructor(options: Partial<CliProviderOptions> = {}) {
     super({ id: 'claude-code', command: 'claude', args: ['-p', '--output-format', 'json'], outputFormat: 'json', promptMode: 'argument', ...options });
   }
-  protected buildInvocation(prompt: string): CliInvocation {
-    const args = [...(this.options.args ?? []), prompt];
+  protected canResume(): boolean {
+    const args = this.options.args ?? [];
+    return this.id === 'claude-code' && (args.includes('-p') || args.includes('--print'))
+      && !args.some((arg) => ['--resume', '-r', '--continue', '-c', '--fork-session', '--session-id', '--no-session-persistence'].includes(arg));
+  }
+  protected buildInvocation(prompt: string, sessionId?: string): CliInvocation {
+    const args = [...(this.options.args ?? []), ...(sessionId ? ['--resume', sessionId] : []), prompt];
     return { command: this.options.command, args, cwd: this.options.cwd ?? process.cwd(), promptMode: 'argument' };
   }
   protected parseOutput(raw: string): ParsedCliOutput { return parseClaude(raw, this.options.outputFormat ?? 'json'); }

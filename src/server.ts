@@ -13,6 +13,7 @@ import { SkillRegistry } from './core/skills.ts';
 import { KnowledgeService, KNOWLEDGE_LIMITS } from './core/knowledge.ts';
 import { CONTEXT_LIMITS } from './core/conversation.ts';
 import { PLAN_LIMITS } from './core/planner.ts';
+import { EVENT } from './core/types.ts';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(SRC_DIR, '..');
@@ -239,6 +240,16 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
       if (method === 'POST' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 4 && parts[3] === 'fork') {
         const body = await readJson(request);
         sendJson(response, 201, { thread: await store.forkThread(parts[2], { title: body.title, messageId: body.messageId }) });
+        return;
+      }
+      if (method === 'DELETE' && parts[0] === 'api' && parts[1] === 'threads' && parts[3] === 'agents' && parts[5] === 'session' && parts.length === 6) {
+        requireThread(parts[2]);
+        const agent = registry.get(parts[4]);
+        if (!agent) throw Object.assign(new Error('agent not found'), { code: 'NOT_FOUND' });
+        if (orchestrator.activeRuns.has(parts[2])) throw Object.assign(new Error('请等待当前协作结束后再开启新的 CLI 会话。'), { code: 'CONFLICT' });
+        await store.resetAgentSession(parts[2], agent.id);
+        await orchestrator.emit(parts[2], EVENT.SESSION_RESET, { agentId: agent.id });
+        sendJson(response, 200, { reset: true, agentId: agent.id });
         return;
       }
       if (method === 'GET' && parts[0] === 'api' && parts[1] === 'threads' && parts[3] === 'plans' && (parts.length === 4 || parts.length === 5)) {

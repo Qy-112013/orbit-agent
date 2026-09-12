@@ -19,6 +19,8 @@ export const EVENT = Object.freeze({
   CONTEXT_RETRIEVED: 'context.retrieved',
   CONTEXT_COMPACTED: 'context.compacted',
   KNOWLEDGE_RETRIEVED: 'knowledge.retrieved',
+  SESSION_BOUND: 'session.bound',
+  SESSION_RESET: 'session.reset',
   PLAN_CREATED: 'plan.created',
   PLAN_UPDATED: 'plan.updated',
   PLAN_STEP_STARTED: 'plan.step.started',
@@ -78,6 +80,7 @@ export interface Thread {
   metadata: Record<string, unknown>;
   archived?: boolean;
   summary?: ConversationSummary;
+  agentSessions?: Record<string, NativeAgentSession>;
   messages?: Message[];
 }
 
@@ -88,6 +91,15 @@ export interface ConversationSummary {
   method: 'extractive-v1';
   updatedAt: string;
 }
+
+export interface NativeAgentSession {
+  provider: 'codex' | 'claude-code';
+  sessionId: string;
+  profile: string;
+  updatedAt: string;
+}
+
+export const NATIVE_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 export interface Citation {
   id: string;
@@ -268,6 +280,7 @@ export interface ProviderContext {
   summary?: ConversationSummary;
   knowledge?: KnowledgeHit[];
   supportingSources?: Citation[];
+  nativeSession?: NativeAgentSession;
   contextChars?: number;
   workflow?: { kind: 'planning' | 'review'; goal: string; participants: string[]; revision: number };
 }

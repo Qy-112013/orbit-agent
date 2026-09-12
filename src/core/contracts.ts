@@ -1,4 +1,4 @@
-import type { ExecutionEvent, ExecutionPlan, KnowledgeChunk, KnowledgeDocument, Memory, Message, ProviderInput, ProviderResult, Task, Thread } from './types.ts';
+import type { ExecutionEvent, ExecutionPlan, KnowledgeChunk, KnowledgeDocument, Memory, Message, NativeAgentSession, ProviderInput, ProviderResult, Task, Thread } from './types.ts';
 
 /** Small ports that keep provider and storage implementations replaceable. */
 export interface ProviderAdapter {
@@ -15,6 +15,7 @@ export interface StoragePort {
   createTask(input: { title: string; threadId?: string | null; owner?: string | null; status?: string }): Promise<Task>;
   appendEvent(input: { threadId?: string | null; type: string; payload?: Record<string, unknown> }): Promise<ExecutionEvent>;
   savePlan(plan: ExecutionPlan): Promise<ExecutionPlan>;
+  saveAgentSession(threadId: string, agentId: string, session: NativeAgentSession): Promise<NativeAgentSession>;
   listKnowledgeDocuments(input?: { threadId?: string }): KnowledgeDocument[];
   listKnowledgeChunks(documentIds: string[]): KnowledgeChunk[];
   saveKnowledgeDocument(document: KnowledgeDocument, chunks: KnowledgeChunk[]): Promise<{ document: KnowledgeDocument; duplicate: boolean }>;
