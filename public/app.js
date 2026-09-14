@@ -45,6 +45,9 @@ const state = {
   selectedPlanId: null,
   documents: [],
   knowledgeHits: [],
+  knowledgeRetrieval: null,
+  retrieval: null,
+  reindexing: false,
   plans: [],
   drafts: new Map(),
   draftModes: new Map(),
@@ -253,7 +256,7 @@ function traceClass(event) {
 function traceDetail(event) {
   const payload = event.payload ?? {};
   if (event.type === 'context.compacted') return `${payload.messageCount} 条消息 · 截至 #${payload.throughSequence}`;
-  if (event.type === 'knowledge.retrieved') return `${payload.count} 个片段 · ${(payload.sources ?? []).map((source) => source.title).join('、')}`;
+  if (event.type === 'knowledge.retrieved') return `${payload.count} 个片段 · ${payload.method === 'hybrid' ? '语义 + 关键词' : payload.method === 'vector' ? '语义检索' : '关键词检索'}${payload.fallbackReason ? ' · 已回退到关键词' : ''} · ${(payload.sources ?? []).map((source) => source.title).join('、')}`;
   if (event.type.startsWith('plan.')) return `第 ${(payload.revision ?? 0) + 1} 版 · ${payload.stepId ?? ''} ${payload.owner ?? ''} · ${payload.verdict ?? payload.status ?? ''}${payload.reason ? ' · ' + payload.reason : ''}`;
   if (event.type === 'agent.delegated' || event.type === 'agent.returned') return `${payload.fromAgentId} → ${payload.toAgentId}${payload.status ? ` · ${payload.status}` : ''}`;
   if (event.type.startsWith('discussion.round.')) return `第 ${payload.round} 轮`;
@@ -284,7 +287,7 @@ function renderTrace() {
 function renderMemories() {
   $('#memory-count').textContent = String(state.memories.length);
   $('#memory-list').innerHTML = state.memories.length
-    ? state.memories.slice(0, 8).map((memory) => `<div class="memory-item"><div class="memory-text">${escapeHtml(memory.text)}</div><div class="memory-meta"><span>${escapeHtml(memory.source ?? 'manual')}</span><span class="memory-score">${memory.score ? `${Math.round(memory.score * 100)}% match` : relativeTime(memory.createdAt)}</span></div></div>`).join('')
+    ? state.memories.slice(0, 8).map((memory) => `<div class="memory-item"><div class="memory-text">${escapeHtml(memory.excerpt ?? memory.text)}</div><div class="memory-meta"><span>${escapeHtml(memory.source ?? 'manual')}</span><span class="memory-score">${memory.score !== undefined ? `分数 ${Number(memory.score).toFixed(2)}` : relativeTime(memory.createdAt)}</span></div></div>`).join('')
     : '<div class="empty-state compact">暂无记忆。可发送 <code>记住：…</code> 建立一条。</div>';
 }
 
@@ -341,11 +344,18 @@ function renderPlans() {
 }
 
 function renderKnowledge() {
+  const retrieval = state.knowledgeRetrieval;
+  const labels = { bm25: '关键词检索', keyword: '关键词检索', hybrid: '语义 + 关键词检索', vector: '语义检索' };
+  const label = retrieval?.fallbackReason ? '语义服务暂不可用，已使用关键词检索' : labels[retrieval?.method ?? (state.retrieval?.enabled ? 'hybrid' : 'bm25')];
+  $('#knowledge-method').textContent = label + (retrieval?.index?.pending ? ` · ${retrieval.index.pending} 个片段待索引` : '');
+  $('#reindex-knowledge').classList.toggle('hidden', !state.retrieval?.enabled);
+  $('#reindex-knowledge').disabled = state.reindexing;
+  $('#reindex-knowledge').textContent = state.reindexing ? '正在构建…' : '补建语义索引';
   $('#knowledge-count').textContent = String(state.documents.length);
   $('#knowledge-documents').innerHTML = state.documents.length ? state.documents.map((document) => `<div class="knowledge-document"><button class="text-button knowledge-document-title" type="button" data-document-id="${escapeHtml(document.id)}">${escapeHtml(document.title)}</button><div class="knowledge-document-meta"><span>${document.threadId ? '本会话' : '工作区'} · ${document.chunkCount} 个片段</span><button class="text-button" type="button" data-delete-document="${escapeHtml(document.id)}" aria-label="移除 ${escapeHtml(document.title)}">移除</button></div></div>`).join('') : '<div class="empty-state compact">导入 TXT 或 Markdown，回答时可引用原文。</div>';
   $('#knowledge-results').innerHTML = $('#knowledge-query').value.trim() ? state.knowledgeHits.length
     ? state.knowledgeHits.map((hit) => `<div class="knowledge-result">${citationMarkup(hit.citation)}<div class="citation-meta">检索分数 ${Number(hit.score).toFixed(2)}</div></div>`).join('')
-    : '<div class="empty-state compact">没有匹配片段，试试文档中的关键词。</div>' : '';
+    : '<div class="empty-state compact">没有匹配片段，试试更具体的问题或关键词。</div>' : '';
 }
 
 async function searchKnowledge(event) {
@@ -353,11 +363,28 @@ async function searchKnowledge(event) {
   const query = $('#knowledge-query').value.trim();
   const threadId = state.selectedThreadId;
   const requestId = ++state.searchRefresh;
-  if (!query || !threadId) { state.knowledgeHits = []; renderKnowledge(); return; }
+  if (!query || !threadId) { state.knowledgeHits = []; state.knowledgeRetrieval = null; renderKnowledge(); return; }
   const payload = await api(`/api/knowledge/search?threadId=${encodeURIComponent(threadId)}&q=${encodeURIComponent(query)}`);
   if (state.selectedThreadId !== threadId || requestId !== state.searchRefresh) return;
   state.knowledgeHits = payload.hits ?? [];
+  state.knowledgeRetrieval = { method: payload.method, fallbackReason: payload.fallbackReason, index: payload.index };
   renderKnowledge();
+}
+
+async function reindexKnowledge() {
+  const threadId = state.selectedThreadId;
+  if (!threadId || state.reindexing) return;
+  state.reindexing = true;
+  renderKnowledge();
+  try {
+    const payload = await api('/api/retrieval/reindex', { method: 'POST', body: JSON.stringify({ threadId }) });
+    if (state.selectedThreadId !== threadId) return;
+    const failure = payload.knowledge?.error ?? payload.memory?.error;
+    const pending = (payload.knowledge?.pending ?? 0) + (payload.memory?.pending ?? 0);
+    state.knowledgeRetrieval = { method: failure ? 'bm25' : 'hybrid', fallbackReason: failure, index: payload.knowledge };
+    showToast(failure ? '语义索引暂未完成，已保留进度，可稍后重试。' : pending ? `本批索引已完成，还有 ${pending} 个片段，可继续补建。` : '文档和长期记忆的语义索引已就绪。', failure ? 'error' : undefined);
+    if (!failure && $('#knowledge-query').value.trim()) await searchKnowledge();
+  } finally { state.reindexing = false; renderKnowledge(); }
 }
 
 function openKnowledgeDialog() {
@@ -389,7 +416,8 @@ async function importKnowledge(event) {
       ...($('#knowledge-scope').value === 'thread' ? { threadId: state.knowledgeImportThreadId } : {}),
     }) });
     $('#knowledge-dialog').close();
-    showToast(payload.duplicate ? '相同正文已存在，沿用已有文档。' : `已导入 ${payload.document.chunkCount} 个文档片段。`);
+    showToast(payload.indexing?.error || payload.indexing?.pending ? '文档已保存；语义索引尚未完成，可稍后补建。'
+      : payload.duplicate ? '相同正文已存在，沿用已有文档。' : `已导入 ${payload.document.chunkCount} 个文档片段。${payload.indexing ? '语义索引已就绪。' : ''}`);
     await refreshAuxiliary();
   } finally { $('#knowledge-save').disabled = false; }
 }
@@ -409,6 +437,7 @@ async function deleteDocument(documentId) {
   if (!document || !window.confirm(`移除知识文档“${document.title}”？已有回答中的引用摘录仍会保留。`)) return;
   await api(`/api/knowledge/documents/${encodeURIComponent(documentId)}?threadId=${encodeURIComponent(state.selectedThreadId)}`, { method: 'DELETE' });
   state.knowledgeHits = [];
+  state.knowledgeRetrieval = null;
   await refreshAuxiliary();
 }
 
@@ -579,6 +608,7 @@ async function selectThread(threadId) {
     state.memories = [];
     state.tasks = [];
     state.knowledgeHits = [];
+    state.knowledgeRetrieval = null;
     state.searchRefresh += 1;
     $('#knowledge-query').value = '';
     $('#timeline').innerHTML = '<div class="empty-state">正在加载会话…</div>';
@@ -661,6 +691,7 @@ async function boot() {
     state.threads = payload.threads ?? [];
     state.stats = payload.stats ?? {};
     state.provider = payload.provider ?? null;
+    state.retrieval = payload.retrieval ?? null;
     renderAgents();
     renderThreads();
     renderMemories();
@@ -713,6 +744,7 @@ $('#import-knowledge').addEventListener('click', openKnowledgeDialog);
 $('#knowledge-file').addEventListener('change', handleAction(loadKnowledgeFile));
 $('#knowledge-form').addEventListener('submit', handleAction(importKnowledge));
 $('#knowledge-search').addEventListener('submit', handleAction(searchKnowledge));
+$('#reindex-knowledge').addEventListener('click', handleAction(reindexKnowledge));
 $('#knowledge-documents').addEventListener('click', handleAction(async (event) => {
   const view = event.target.closest('[data-document-id]');
   const remove = event.target.closest('[data-delete-document]');

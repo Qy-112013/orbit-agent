@@ -90,19 +90,19 @@ export function createDefaultTools({ memory, store, knowledge = new KnowledgeSer
   return new ToolRegistry()
     .register({
       name: 'search_memory',
-      description: '在当前线程和全局记忆中做轻量关键词检索',
+      description: '在当前线程和全局记忆中检索；配置 embedding 后默认混合语义与关键词召回。mode 可选 hybrid、vector 或 keyword。',
       readOnly: true,
-      inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 20 } }, required: ['query'], additionalProperties: false },
-      execute: async ({ query, limit = 5 } = {}, context = {}) =>
-        memory.search(asNonEmptyString(query, 'query'), { threadId: context.threadId, limit }),
+      inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 20 }, mode: { type: 'string', enum: ['hybrid', 'vector', 'keyword'] } }, required: ['query'], additionalProperties: false },
+      execute: async ({ query, limit = 5, mode = 'hybrid' } = {}, context = {}) =>
+        memory.search(asNonEmptyString(query, 'query'), { threadId: context.threadId, limit, mode }),
     })
     .register({
       name: 'search_knowledge',
-      description: 'Search imported documents with BM25. Each result has chunkId, score and citation (id, text, title, source, source lines). The returned count may be lower than limit to fit the result budget.',
+      description: 'Search imported documents with semantic + BM25 retrieval when embeddings are configured, otherwise BM25. Optional mode: hybrid (default), vector or keyword. Each result has chunkId, score and citation (id, text, title, source, source lines). Results are bounded to fit the context budget.',
       readOnly: true,
-      inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 8 } }, required: ['query'], additionalProperties: false },
-      execute: async ({ query, limit = 3 }, context = {}) => {
-        const matches = knowledge.search(query, { threadId: context.threadId, limit }).map(knowledgeToolResult);
+      inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 2000 }, limit: { type: 'integer', minimum: 1, maximum: 8 }, mode: { type: 'string', enum: ['hybrid', 'vector', 'keyword'] } }, required: ['query'], additionalProperties: false },
+      execute: async ({ query, limit = 3, mode = 'hybrid' }, context = {}) => {
+        const matches = (await knowledge.search(query, { threadId: context.threadId, limit, mode })).map(knowledgeToolResult);
         const selected = [];
         for (const match of matches) {
           if (selected.length && JSON.stringify([...selected, match]).length > (context.maxResultChars ?? 8000)) break;

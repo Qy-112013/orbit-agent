@@ -47,11 +47,11 @@ v0.3 新增长会话摘要、会话管理、文档 RAG 和 `#plan` 执行流程�
 | **稳定 Agent 身份** | Atlas、Forge、Lens 各自拥有角色、system prompt、别名和责任归属。 |
 | **持久协作线程** | 消息、active Agent 和更新时间写入本地 JSON，重启后可以继续工作。 |
 | **多轮会话管理** | 搜索、重命名、归档与分支；近期消息与历史摘录共同构成有界上下文，切换会话保留当前页面内的草稿。 |
-| **文档 RAG 知识库** | 导入 TXT/Markdown，按范围隔离、分块并使用 BM25 检索，回答引用可展开核对原文和行号。 |
+| **文档 RAG 知识库** | 导入 TXT/Markdown，按范围隔离；可选 embedding 向量与 BM25 混合检索，回答引用可展开核对原文和行号。 |
 | **计划、复核与重规划** | `#plan` 生成带 owner、依赖和验收标准的步骤；失败或复核反馈触发最多 2 次重规划，保留各版结果。 |
 | **确定性 mention 路由** | 用 `@atlas`、`@forge`、`@lens` 或 `@all` 明确指定目标，不把业务路由交给模型猜。 |
 | **串行/并行编排** | 多目标默认并行独立判断，也可以用 `#serial` 让后续 Agent 接收前序结果摘要。 |
-| **长期记忆与引用** | 用 `记住：...` 或 API 写入事实，按关键词、重要性和时间衰减召回，并保留 `memory:<id>` 引用。 |
+| **长期记忆与引用** | 用 `记住：...` 或 API 写入事实，支持语义与关键词混合召回；关键词排序保留重要性和时间衰减，引用为 `memory:<id>`。 |
 | **Agent 委派与回传** | 支持工具调用的 API 模型可通过 `delegate_to_agent` 请求其他 Agent 协助；每轮最多 2 次、深度 1 层，保留父子 run 与消息引用。 |
 | **两轮讨论与汇总** | `#discuss` 让 2–4 个 Agent 先独立判断，再阅读前轮观点复核，最后由第一个 Agent 汇总共识与分歧；兼容 API 和 CLI Provider。 |
 | **ReAct 式工具循环** | 单个 Agent 最多 5 次模型调用、8 次工具请求；检索知识、读取 workspace 并根据真实工具结果继续回答，记录每一步事件。 |
@@ -121,7 +121,18 @@ npm run check:ui            # 本机浏览器验证桌面操作流程
 
 `#plan` 也兼容能返回所需 JSON 的 API/CLI Provider。每版最多 5 个步骤，整个计划最多执行 8 个步骤；服务重启会将未完成计划标为中断。LocalProvider 只作演示，不能通过真实计划验收。普通消息仍使用当前 Agent，不会默认同时启动三个 Agent。
 
-知识库位于右侧“知识库”卡片。导入文档后直接提问；当前实现是文本分块与 BM25 检索，不依赖向量数据库。会话连续性、来源引用与执行记录均可在界面检查。
+知识库位于右侧“知识库”卡片。导入文档后直接提问；默认使用 BM25，配置 embedding 后自动启用语义与关键词混合检索，向量保存在本地，不需要独立向量数据库。会话连续性、来源引用与实际检索方式均可在界面检查。
+
+### 启用 embedding 向量检索
+
+```powershell
+$env:ORBIT_EMBEDDING_MODEL="text-embedding-3-small"
+$env:ORBIT_EMBEDDING_BASE_URL="https://api.openai.com/v1"
+$env:ORBIT_EMBEDDING_API_KEY="你的 embedding 服务密钥"
+npm start
+```
+
+知识库和长期记忆共用此配置，与聊天模型及 CLI 独立。支持提供 `/v1/embeddings` 的兼容网关或本地服务；新资料自动建索引，旧资料可点击“补建语义索引”。服务不可用时回退到关键词检索并显示状态。配置项、存储方式与 API 见 [Embedding 与向量检索](docs/EMBEDDING-RETRIEVAL.md)。
 
 ## Provider 与 CLI 适配器
 
@@ -193,7 +204,8 @@ Orchestrator
    ├─ PlanExecutor    validated steps → execute → review → bounded replan
    ├─ Router          @mention → serial / parallel / discuss / plan
    ├─ MemoryService   recent conversation + durable excerpts + memory
-   ├─ KnowledgeService text chunks + BM25 + source citations
+   ├─ KnowledgeService text chunks + hybrid retrieval + source citations
+   ├─ VectorIndex     optional embeddings + persistent local cosine index
    ├─ ToolRegistry    explicit allow-list tools
    ├─ SkillRegistry   Markdown skills + metadata matching
    ├─ Provider        OpenAI-compatible / CLI → local fallback
@@ -230,6 +242,8 @@ SSE 只是事件投影。客户端断线重连时，可以用 `after=` 或 `Last
 | GET/POST | `/api/knowledge/documents` | 查询或导入知识文档 |
 | GET/DELETE | `/api/knowledge/documents/:id` | 读取原文或移除文档 |
 | GET | `/api/knowledge/search` | 按 q 与 threadId 检索原文片段 |
+| GET | `/api/retrieval` | 查看 embedding 配置状态与当前范围索引进度 |
+| POST | `/api/retrieval/reindex` | 分批补建文档与长期记忆缺失的向量 |
 | GET/POST/PATCH | `/api/tasks` | 查询、创建或更新任务 |
 | GET | `/api/tools` | 查看 allow-list 工具 |
 | GET | `/api/providers` | 查看 Provider 映射 |
@@ -258,11 +272,11 @@ Orbit 将当前版本控制在一条可验证的协作闭环内：
 - 内置工具不执行任意 shell 命令，不允许工具路径逃逸配置的 workspace；
 - 不接收浏览器传入的模型密钥，Provider 是唯一的外部模型边界；
 - 不把无限历史塞给模型，消息、事件和上下文都有明确上限；
-- `JsonStore` 是唯一持久化写入者，写入串行化并使用原子替换；
+- 会话与原文由 `JsonStore` 串行持久化；可重建的向量缓存由独立索引写入，均使用临时文件替换；
 - CLI 适配器是显式 opt-in 的外部进程边界，交互式 PTY 和自动权限升级暂不支持；
 - 当前不包含多用户认证、组织权限、远程 MCP transport、Redis/向量数据库和自动调度。
 
-这些限制不是缺陷清单，而是为了让每个边界都能被测试、解释和替换。未来可以在不改动 Router、Orchestrator 或事件契约的前提下，将 `JsonStore` 替换为 SQLite/Redis，将 lexical recall 升级为 embedding + rerank。
+后续可以将 `JsonStore` 替换为 SQLite/Redis，将本地向量索引替换为专用向量存储，或增加独立的 rerank 模型。
 
 ## 项目文档
 
@@ -273,6 +287,7 @@ Orbit 将当前版本控制在一条可验证的协作闭环内：
 - [`docs/PRODUCT-SCOPE.md`](docs/PRODUCT-SCOPE.md)：为什么保留这些能力、暂不做哪些能力
 - [`docs/TYPESCRIPT-MIGRATION.md`](docs/TYPESCRIPT-MIGRATION.md)：从原始 demo kernel 到 TypeScript runtime 的迁移说明
 - [`docs/SESSION-RAG-PLANNING.md`](docs/SESSION-RAG-PLANNING.md)：v0.3 会话管理、RAG、ReAct、计划执行、API 与验证方法
+- [`docs/EMBEDDING-RETRIEVAL.md`](docs/EMBEDDING-RETRIEVAL.md)：embedding 配置、混合检索、缓存与索引补建
 - [`docs/ORIGIN-NOTES.md`](docs/ORIGIN-NOTES.md)：架构灵感与开源来源记录
 - [`docs/COLLABORATION-EXTENSION.md`](docs/COLLABORATION-EXTENSION.md)：多 Agent 交互、上游对照、执行边界和演示方法
 

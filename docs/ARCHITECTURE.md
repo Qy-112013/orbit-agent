@@ -2,6 +2,8 @@
 
 > 版本说明：本文保留基础架构设计记录。v0.3 的会话摘要、文档 RAG、ReAct、PlanExecutor、状态模型与 API 以 [SESSION-RAG-PLANNING.md](SESSION-RAG-PLANNING.md) 和当前源码为准。
 
+> 检索更新：已支持可选 embedding、持久化本地向量索引与关键词混合召回，见 [EMBEDDING-RETRIEVAL.md](EMBEDDING-RETRIEVAL.md)。`search()` / `buildContext()` 现为异步接口；下文的早期词法实现示例保留作基础设计记录。
+
 ## 1. 文档范围
 
 本文描述 Orbit Agent 运行时的整体结构：分层、模块职责、领域模型、执行生命周期、事件契约、并发与失败模型、容量限额和安全边界。
@@ -27,7 +29,7 @@
 - 多用户认证、组织权限、租户隔离；
 - 任意 shell/PTY 执行、自动改写用户仓库；
 - 分布式部署、水平扩展、跨进程共享状态；
-- 向量检索、embedding pipeline、模型 token 流式输出；
+- 独立向量数据库、独立 rerank 模型、模型 token 流式输出；
 - 插件市场、审批工作流、定时调度。
 
 这些不是「永远不做」，而是当前架构刻意留出的扩展位，见 §18。
@@ -446,7 +448,7 @@ score = 命中词数 / 查询词数
 演进顺序按「保持契约不变」排列，每一步只替换一个适配器：
 
 1. **`JsonStore` → SQLite。** 保持相同的方法签名与事件序号语义；获得增量写入与更大数据量。编排层零改动。
-2. **`MemoryService` 加 embedding + rerank，保留词法兜底。** 只要 `search()`/`buildContext()` 返回形状不变，Provider 与 UI 不用改。
+2. **在已有 embedding 混合检索之上增加独立 rerank 或专用向量存储。** 保留词法兜底、实际检索方式与来源引用。
 3. **Provider 升级为 token streaming。** 复用现有 SSE 通道，新增 `agent.delta` 事件类型，`agent.started/completed` 语义不变。
 4. **工具加 capability policy 与人工确认态。** 在 `ToolRegistry.execute` 前插入策略检查，并把待确认状态表达为新的事件类型。
 5. **模型驱动的工具调用。** 在 Orchestrator 内加入受限的工具调用循环（带最大轮数），事件里记录每一次调用。

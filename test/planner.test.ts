@@ -151,7 +151,7 @@ test('restart marks an in-flight plan interrupted, keeps completed evidence and 
   const now = new Date().toISOString();
   await fixture.store.savePlan({ id: 'plan_crash', threadId: fixture.threadId, requestMessageId: 'msg_crash', goal: 'recover', participants: ['atlas'], plannerId: 'atlas', reviewerId: 'atlas', status: 'running', revisions: [{ revision: 0, reason: 'initial', createdAt: now, steps: [{ ...step('done'), status: 'completed', result: 'persisted evidence' }, { ...step('inflight', 'atlas', ['done']), status: 'running' }] }], replanCount: 0, stepRunCount: 2, outcome: '', createdAt: now, updatedAt: now });
   let calls = 0;
-  const restored = await createApp({ dataFile: fixture.dataFile, workspaceRoot: fixture.root, provider: { async complete() { calls += 1; return { content: 'unexpected invocation' }; } } });
+  const restored = await createApp({ dataFile: fixture.dataFile, workspaceRoot: fixture.root, embeddingProvider: null, provider: { async complete() { calls += 1; return { content: 'unexpected invocation' }; } } });
   const plan = restored.runtime.store.getPlan('plan_crash');
   assert.equal(plan.status, 'interrupted');
   assert.equal(plan.revisions[0].steps[0].result, 'persisted evidence');

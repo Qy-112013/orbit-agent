@@ -9,7 +9,7 @@ import { createWorkflowDemoProvider } from './workflow-demo-provider.ts';
 const root = await mkdtemp(join(tmpdir(), 'orbit-workflow-demo-'));
 try {
   const dataFile = join(root, 'state.json');
-  const { runtime } = await createApp({ dataFile, workspaceRoot: root, provider: createWorkflowDemoProvider(), loopOptions: { toolsEnabled: true } });
+  const { runtime } = await createApp({ dataFile, workspaceRoot: root, provider: createWorkflowDemoProvider(), embeddingProvider: null, loopOptions: { toolsEnabled: true } });
   const threadId = runtime.store.listThreads()[0].id;
   await runtime.store.appendMessage({ threadId, role: 'user', content: '原始目标：仅使用本地资料核对 Quartz 发布说明。' });
   for (let index = 1; index < 16; index += 1) await runtime.store.appendMessage({ threadId, role: index % 2 ? 'assistant' : 'user', content: `历史记录 ${index}：需要保留来源，尚未声称通过验收。` });

@@ -139,6 +139,8 @@ export interface KnowledgeHit extends KnowledgeChunk {
   title: string;
   source: string;
   score: number;
+  lexicalScore?: number;
+  vectorScore?: number;
   citation: Citation;
 }
 
@@ -211,6 +213,10 @@ export interface Memory {
   createdAt: string;
   updatedAt: string;
   score?: number;
+  lexicalScore?: number;
+  vectorScore?: number;
+  /** Matched passage of a long memory, used within the context budget. */
+  excerpt?: string;
   citation?: string;
 }
 
@@ -282,6 +288,7 @@ export interface ProviderContext {
   supportingSources?: Citation[];
   nativeSession?: NativeAgentSession;
   contextChars?: number;
+  retrieval?: { memory?: import('./vector-index.ts').RetrievalMetadata; knowledge?: import('./vector-index.ts').RetrievalMetadata };
   workflow?: { kind: 'planning' | 'review'; goal: string; participants: string[]; revision: number };
 }
 

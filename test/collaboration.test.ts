@@ -11,7 +11,7 @@ async function setup(t, provider, loopOptions = {}) {
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'evidence.txt'), 'verified implementation evidence');
   const dataFile = join(root, 'state.json');
-  const { runtime } = await createApp({ dataFile, workspaceRoot: root, provider, loopOptions });
+  const { runtime } = await createApp({ dataFile, workspaceRoot: root, provider, loopOptions, embeddingProvider: null });
   return { ...runtime, dataFile, threadId: runtime.store.listThreads()[0].id };
 }
 const delegate = (id, agentId, task) => ({ id, name: 'delegate_to_agent', arguments: JSON.stringify({ agentId, task }) });

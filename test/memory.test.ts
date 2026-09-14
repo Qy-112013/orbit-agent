@@ -20,7 +20,7 @@ test('ranks memories by lexical overlap and importance', async (t) => {
   t.after(() => rm(fixtureData.root, { recursive: true, force: true }));
   await fixtureData.memory.remember('GraphQL schema review checklist', { importance: 0.8 });
   await fixtureData.memory.remember('今天的午餐是面条', { importance: 0.2 });
-  const results = fixtureData.memory.search('schema review', { limit: 2 });
+  const results = await fixtureData.memory.search('schema review', { limit: 2 });
   assert.equal(results.length, 1);
   assert.match(results[0].text, /GraphQL/);
   assert.match(results[0].citation, /^memory:/);
@@ -33,7 +33,7 @@ test('searches memories beyond the HTTP display page', async (t) => {
     await fixtureData.memory.remember(`unrelated fact ${index}`, { importance: 0.1 });
   }
   await fixtureData.memory.remember('durable needle survives deep history', { importance: 0.9 });
-  const results = fixtureData.memory.search('durable needle', { limit: 3 });
+  const results = await fixtureData.memory.search('durable needle', { limit: 3 });
   assert.equal(results[0].text, 'durable needle survives deep history');
 });
 

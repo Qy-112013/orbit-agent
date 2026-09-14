@@ -431,7 +431,7 @@ user:    <清洗后的正文>
 | --- | --- |
 | 多用户账号、组织权限、租户隔离 | 没有真实多用户需求前，认证体系会淹没核心链路 |
 | 任意 shell / PTY 执行、自动改写仓库 | 与「能力可审计」的立场直接冲突 |
-| 向量数据库、embedding pipeline | 词法检索已能演示「有界召回 + 可解释引用」，向量检索是替换项不是前置项 |
+| 独立向量数据库、独立 rerank 模型 | 当前提供本地 embedding / 关键词混合检索，配置与边界见 [EMBEDDING-RETRIEVAL.md](EMBEDDING-RETRIEVAL.md) |
 | 分布式部署、水平扩展 | 单进程单文件是当前的容量假设，见架构文档 §9 |
 | 插件市场、审批工作流、定时调度 | 都需要先有稳定的工具策略层 |
 | 桌面安装器、语音、第三方 IM 连接器 | 与核心问题无关 |
@@ -441,7 +441,7 @@ user:    <清洗后的正文>
 每一步只替换一个适配器，保持契约不变：
 
 1. `JsonStore` → SQLite（方法签名与事件序号语义不变，编排层零改动）
-2. `MemoryService` 加 embedding + rerank，保留词法兜底
+2. 在已实现的 embedding 混合检索之上增加独立 rerank 或专用向量存储，保留词法兜底
 3. Provider 升级为 token streaming，复用现有 SSE 通道，新增 `agent.delta` 事件
 4. 工具加 capability policy 与人工确认态
 5. 开放模型驱动的工具调用循环（带最大轮数限制）

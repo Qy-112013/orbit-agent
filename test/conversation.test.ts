@@ -44,7 +44,7 @@ test('branching at an earlier message excludes later messages, summaries and thr
   assert.notEqual(restored.messages[0].id, first.id);
   assert.equal(restored.metadata.parentThreadId, fixture.threadId);
   assert.equal(restored.summary, undefined);
-  assert.ok(!JSON.stringify(fixture.memory.buildContext(fork.id, '目标')).includes('未来信息'));
+  assert.ok(!JSON.stringify(await fixture.memory.buildContext(fork.id, '目标')).includes('未来信息'));
   assert.equal(fixture.knowledge.list({ threadId: fork.id }).length, 0);
   await fixture.store.appendMessage({ threadId: fork.id, role: 'user', content: '分支新消息' });
   assert.equal(fixture.store.getThread(fixture.threadId).messages.length, 19);
@@ -55,7 +55,7 @@ test('API providers preserve conversation roles and send the current user messag
   await fixture.store.appendMessage({ threadId: fixture.threadId, role: 'user', content: '上一问' });
   await fixture.store.appendMessage({ threadId: fixture.threadId, role: 'assistant', agentId: 'forge', content: '上一答' });
   const current = await fixture.store.appendMessage({ threadId: fixture.threadId, role: 'user', content: '当前唯一请求' });
-  const context = fixture.memory.buildContext(fixture.threadId, '当前唯一请求', { excludeMessageId: current.id });
+  const context = await fixture.memory.buildContext(fixture.threadId, '当前唯一请求', { excludeMessageId: current.id });
   let request;
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     request = JSON.parse(options.body);
@@ -72,7 +72,7 @@ test('CLI prompts include the complete bounded history, summary and source ident
   for (let index = 1; index <= 20; index += 1) await fixture.store.appendMessage({ threadId: fixture.threadId, role: 'user', content: `history-marker-${index}` });
   await fixture.knowledge.importDocument({ title: 'Quartz 来源', content: 'Quartz checksum b12', source: 'release.md' });
   const context = await fixture.memory.prepareContext(fixture.threadId, 'Quartz');
-  context.knowledge = fixture.knowledge.search('Quartz');
+  context.knowledge = await fixture.knowledge.search('Quartz');
   context.citations = context.knowledge.map((hit) => hit.citation);
   const cli = new CliProvider({ id: 'fixture-cli', command: process.execPath, args: ['-e', 'let text="";process.stdin.on("data",part=>text+=part);process.stdin.on("end",()=>process.stdout.write(JSON.stringify({result:text})));'], cwd: fixture.root, workspaceRoot: fixture.root, promptMode: 'stdin', outputFormat: 'json' });
   const result = await cli.complete({ agent: fixture.registry.get('atlas'), content: 'new-cli-request', context });

@@ -254,17 +254,20 @@ export class Orchestrator {
     const retrievalQuery = route.cleanContent.length < 80 && previousQuestion
       ? `${route.cleanContent}\n${previousQuestion.slice(0, 1200)}` : route.cleanContent;
     let knowledgeChars = 0;
-    context.knowledge = this.knowledge.search(retrievalQuery, { threadId, limit: 5 }).filter((hit) => {
+    const { hits: knowledgeHits, ...knowledgeRetrieval } = await this.knowledge.searchWithMetadata(retrievalQuery, { threadId, limit: 5 });
+    context.retrieval = { ...context.retrieval, knowledge: knowledgeRetrieval };
+    context.knowledge = knowledgeHits.filter((hit) => {
       if (knowledgeChars + hit.text.length > CONTEXT_LIMITS.knowledgeChars) return false;
       knowledgeChars += hit.text.length;
       return true;
     });
     context.citations = [...context.knowledge.map((hit) => hit.citation), ...context.citations];
     context.contextChars = (context.contextChars ?? 0) + knowledgeChars;
-    await this.emit(threadId, EVENT.KNOWLEDGE_RETRIEVED, { count: context.knowledge.length, method: 'bm25',
+    await this.emit(threadId, EVENT.KNOWLEDGE_RETRIEVED, { count: context.knowledge.length, ...knowledgeRetrieval,
       sources: context.knowledge.map((hit) => ({ id: hit.citation.id, title: hit.title, score: hit.score, startLine: hit.startLine, endLine: hit.endLine })) });
     await this.emit(threadId, EVENT.CONTEXT_RETRIEVED, {
       memoryCount: context.memories.length,
+      memoryRetrieval: context.retrieval?.memory,
       messageCount: context.recentMessages.length,
       summaryMessages: context.summary?.messageCount ?? 0,
       knowledgeCount: context.knowledge.length,

@@ -112,7 +112,7 @@ test('thinking API preserves full protocol state while delegating to a CLI, with
       args: ['-e', "process.stdout.write(JSON.stringify({result:'GLM CLI fixture result'}))"],
       cwd: root, workspaceRoot: root, outputFormat: 'json',
     }));
-  const { runtime } = await createApp({ providers, dataFile: join(root, 'state.json'), workspaceRoot: root });
+  const { runtime } = await createApp({ providers, embeddingProvider: null, dataFile: join(root, 'state.json'), workspaceRoot: root });
   const threadId = runtime.store.listThreads()[0].id;
   const result = await runtime.orchestrator.submitMessage(threadId, '@atlas delegate an implementation task');
   assert.equal(result.messages[0].content, 'Parent integrated the CLI result.');

@@ -206,6 +206,8 @@ summary { cursor: pointer; }
 .knowledge-search { display: flex; gap: 7px; padding: 12px 12px 0; }
 .knowledge-search input { width: 100%; font-size: 11px; }
 .knowledge-search button { flex-shrink: 0; }
+.knowledge-status { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.knowledge-status button { flex-shrink: 0; }
 .knowledge-documents, .knowledge-results { padding: 8px 12px; }
 .knowledge-results:empty { display: none; }
 .knowledge-documents { max-height: 250px; overflow: auto; }

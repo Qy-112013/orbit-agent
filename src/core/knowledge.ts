@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { id } from './ids.ts';
 import { asNonEmptyString, nowIso, type Citation, type KnowledgeChunk, type KnowledgeDocument, type KnowledgeHit } from './types.ts';
 import type { JsonStore } from './store.ts';
+import { fuseRanks, searchMode, type RetrievalMetadata, type SearchMode, type VectorIndex } from './vector-index.ts';
 
 export const KNOWLEDGE_LIMITS = Object.freeze({ documentChars: 200_000, chunkChars: 1_200, overlapChars: 160, documents: 100, totalChars: 5_000_000 });
 const STOP = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'is', 'in', 'it', 'this', 'that', '的', '了', '是', '和', '我们', '你们', '一个', '如何', '什么']);
 
-/** English words and Chinese bigrams; no embedding service is implied. */
+/** English words and Chinese bigrams for BM25 and the offline fallback. */
 function tokenize(text: string): string[] {
   const result = (text.toLowerCase().match(/[a-z0-9][a-z0-9_-]*/g) ?? []).filter((word) => !STOP.has(word));
   for (const run of text.match(/\p{Script=Han}+/gu) ?? []) {
@@ -61,7 +62,17 @@ type KnowledgeStore = Pick<JsonStore, 'listKnowledgeDocuments' | 'listKnowledgeC
 
 export class KnowledgeService {
   private store: KnowledgeStore;
-  constructor(store: KnowledgeStore) { this.store = store; }
+  private vectors?: VectorIndex;
+  constructor(store: KnowledgeStore, vectors?: VectorIndex) { this.store = store; this.vectors = vectors; }
+
+  private vectorSources(threadId?: string, documentId?: string) {
+    const documents = new Map(this.store.listKnowledgeDocuments({ threadId }).filter((document) => !documentId || document.id === documentId).map((document) => [document.id, document]));
+    return this.store.listKnowledgeChunks([...documents.keys()]).map((chunk) => ({ id: chunk.id, text: `${documents.get(chunk.documentId)!.title}\n${chunk.text}` }));
+  }
+
+  indexStatus({ threadId }: { threadId?: string } = {}) { return this.vectors?.status('knowledge', this.vectorSources(threadId)) ?? null; }
+
+  async reindex({ threadId }: { threadId?: string } = {}) { return this.vectors?.index('knowledge', () => this.vectorSources(threadId)) ?? null; }
 
   async importDocument(input: { title: string; content: string; source?: string; threadId?: string | null }) {
     const title = asNonEmptyString(input.title, 'title');
@@ -78,8 +89,9 @@ export class KnowledgeService {
     const document: KnowledgeDocument = { id: documentId, title, content, source, ...(threadId ? { threadId } : {}),
       contentHash: createHash('sha256').update(content).digest('hex'), chunkCount: chunks.length, createdAt: nowIso(), updatedAt: nowIso() };
     const saved = await this.store.saveKnowledgeDocument(document, chunks);
+    const indexing = this.vectors?.enabled ? await this.vectors.index('knowledge', () => this.vectorSources(saved.document.threadId, saved.document.id)) : undefined;
     const { content: omitted, ...metadata } = saved.document;
-    return { document: metadata, duplicate: saved.duplicate };
+    return { document: metadata, duplicate: saved.duplicate, ...(indexing ? { indexing } : {}) };
   }
 
   list({ threadId }: { threadId?: string } = {}) {
@@ -100,9 +112,43 @@ export class KnowledgeService {
     return { ...chunk, title: document.title, source: document.source, score: 0, citation: citationFor(document, chunk) };
   }
 
-  deleteDocument(documentId: string, options: { threadId?: string } = {}) { return this.store.deleteKnowledgeDocument(documentId, options); }
+  async deleteDocument(documentId: string, options: { threadId?: string } = {}) {
+    const chunkIds = this.getDocument(documentId, options).chunks.map((chunk) => chunk.id);
+    await this.store.deleteKnowledgeDocument(documentId, options);
+    await this.vectors?.remove('knowledge', chunkIds);
+  }
 
-  search(query: string, { threadId, limit = 5 }: { threadId?: string; limit?: number } = {}): KnowledgeHit[] {
+  async search(query: string, options: { threadId?: string; limit?: number; mode?: SearchMode } = {}): Promise<KnowledgeHit[]> {
+    return (await this.searchWithMetadata(query, options)).hits;
+  }
+
+  async searchWithMetadata(query: string, { threadId, limit = 5, mode = 'hybrid' }: { threadId?: string; limit?: number; mode?: SearchMode } = {}): Promise<RetrievalMetadata & { hits: KnowledgeHit[] }> {
+    const text = asNonEmptyString(query, 'query').slice(0, 2000);
+    const selectedMode = searchMode(mode);
+    const count = Math.max(1, Math.min(8, Math.floor(limit) || 5));
+    const lexical = this.lexicalSearch(text, { threadId, limit: 40 });
+    const semantic = selectedMode !== 'keyword' && this.vectors?.enabled
+      ? await this.vectors.rank(text, 'knowledge', () => this.vectorSources(threadId)) : null;
+    const method = semantic?.available ? (selectedMode === 'vector' ? 'vector' : 'hybrid') : 'bm25';
+    const ranking = method === 'hybrid' ? fuseRanks(lexical, semantic!.scores, count)
+      : method === 'vector' ? semantic!.scores.slice(0, count) : lexical.slice(0, count);
+    const documents = new Map(this.store.listKnowledgeDocuments({ threadId }).map((document) => [document.id, document]));
+    const chunks = new Map(this.store.listKnowledgeChunks([...documents.keys()]).map((chunk) => [chunk.id, chunk]));
+    const lexicalScores = new Map(lexical.map((hit) => [hit.id, hit.score]));
+    const vectorScores = new Map(semantic?.scores.map((hit) => [hit.id, hit.score]) ?? []);
+    const fallbackReason = semantic?.error ?? (selectedMode === 'vector' && !this.vectors?.enabled ? 'Embedding is not configured; using BM25.' : undefined);
+    const hits = ranking.flatMap(({ id, score }) => {
+      const chunk = chunks.get(id);
+      if (!chunk) return [];
+      const document = documents.get(chunk.documentId)!;
+      return [{ ...chunk, title: document.title, source: document.source, score: Number(score.toFixed(4)),
+        ...(lexicalScores.has(id) ? { lexicalScore: lexicalScores.get(id) } : {}),
+        ...(vectorScores.has(id) ? { vectorScore: Number(vectorScores.get(id)!.toFixed(4)) } : {}), citation: citationFor(document, chunk) }];
+    });
+    return { hits, method, ...(semantic ? { index: semantic.index } : {}), ...(fallbackReason ? { fallbackReason } : {}) };
+  }
+
+  private lexicalSearch(query: string, { threadId, limit = 5 }: { threadId?: string; limit?: number } = {}): KnowledgeHit[] {
     const words = [...new Set(tokenize(asNonEmptyString(query, 'query').slice(0, 2000)))].slice(0, 128);
     if (!words.length) return [];
     const documents = new Map(this.store.listKnowledgeDocuments({ threadId }).map((document) => [document.id, document]));
@@ -128,7 +174,7 @@ export class KnowledgeService {
       }
       return { chunk, score };
     }).filter((row) => row.score > 0).sort((a, b) => b.score - a.score || a.chunk.id.localeCompare(b.chunk.id))
-      .slice(0, Math.max(1, Math.min(8, Math.floor(limit) || 5))).map(({ chunk, score }) => {
+      .slice(0, limit).map(({ chunk, score }) => {
         const document = documents.get(chunk.documentId)!;
         return { ...chunk, title: document.title, source: document.source, score: Number(score.toFixed(4)), citation: citationFor(document, chunk) };
       });

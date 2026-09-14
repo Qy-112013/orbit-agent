@@ -2,6 +2,8 @@ data/state.json
 data/state.json.*.tmp
 data/mcp-state.json
 data/mcp-state.json.*.tmp
+data/*.vectors.json
+data/*.vectors.json.*.tmp
 *.log
 node_modules/
 .orbit-artifacts/

@@ -94,7 +94,8 @@
           <aside class="inspector" aria-label="执行检查器">
             <div class="inspector-card knowledge-card" id="knowledge-panel">
               <div class="card-heading"><div><span class="card-kicker">SOURCES</span><h2>知识库</h2></div><button class="text-button" id="import-knowledge" type="button">＋ 导入文档</button></div>
-              <form class="knowledge-search" id="knowledge-search"><input id="knowledge-query" type="search" placeholder="检索文档片段" maxlength="2000" aria-label="知识库查询" /><button class="text-button" type="submit">检索</button></form>
+              <form class="knowledge-search" id="knowledge-search"><input id="knowledge-query" type="search" placeholder="输入问题或关键词" maxlength="2000" aria-label="知识库查询" /><button class="text-button" type="submit">检索</button></form>
+              <div class="knowledge-status"><span id="knowledge-method" role="status"></span><button class="text-button hidden" id="reindex-knowledge" type="button">补建语义索引</button></div>
               <div id="knowledge-results" class="knowledge-results"></div>
               <div id="knowledge-documents" class="knowledge-documents"><div class="empty-state compact">导入 TXT 或 Markdown，回答时可引用原文。</div></div>
             </div>

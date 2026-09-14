@@ -31,13 +31,13 @@ test('BM25 retrieves English and Chinese source terms while isolating thread-sco
   await fixture.knowledge.importDocument({ title: '公共部署说明', content: 'Quartz deployment requires checksum verification.' });
   const privateDoc = await fixture.knowledge.importDocument({ title: '专用预算', content: 'Quartz 项目的预算上限为 48000 元。', threadId: fixture.threadId });
   await fixture.knowledge.importDocument({ title: '午餐安排', content: '今天午餐是面条。', threadId: second.id });
-  const hits = fixture.knowledge.search('预算上限', { threadId: fixture.threadId });
+  const hits = await fixture.knowledge.search('预算上限', { threadId: fixture.threadId });
   assert.equal(hits[0].documentId, privateDoc.document.id);
   assert.match(hits[0].text, /48000/);
-  assert.equal(fixture.knowledge.search('quartz')[0].title, '公共部署说明');
-  assert.equal(fixture.knowledge.search('预算上限', { threadId: second.id }).length, 0);
-  assert.equal(fixture.knowledge.search('unrelatedneedle').length, 0);
-  assert.equal(fixture.knowledge.search('the and').length, 0);
+  assert.equal((await fixture.knowledge.search('quartz'))[0].title, '公共部署说明');
+  assert.equal((await fixture.knowledge.search('预算上限', { threadId: second.id })).length, 0);
+  assert.equal((await fixture.knowledge.search('unrelatedneedle')).length, 0);
+  assert.equal((await fixture.knowledge.search('the and')).length, 0);
   await assert.rejects(fixture.tools.execute('read_knowledge', { chunkId: hits[0].id }, { threadId: second.id }), { code: 'NOT_FOUND' });
   assert.throws(() => fixture.knowledge.getDocument(privateDoc.document.id), { code: 'NOT_FOUND' });
 });
@@ -70,7 +70,7 @@ test('retrieval augments generation and only actually used, supplied sources bec
   assert.equal(turn.messages[0].citations[0].text, turn.context.knowledge[0].text);
   const citation = turn.messages[0].citations[0];
   await fixture.knowledge.deleteDocument(citation.documentId, { threadId: fixture.threadId });
-  assert.ok(!fixture.knowledge.search('Quartz', { threadId: fixture.threadId }).some((hit) => hit.documentId === citation.documentId));
+  assert.ok(!(await fixture.knowledge.search('Quartz', { threadId: fixture.threadId })).some((hit) => hit.documentId === citation.documentId));
   const saved = fixture.store.getThread(fixture.threadId).messages.find((message) => message.id === turn.messages[0].id);
   assert.equal(saved.citations[0].text, citation.text);
 });

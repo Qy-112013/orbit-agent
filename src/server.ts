@@ -14,6 +14,8 @@ import { KnowledgeService, KNOWLEDGE_LIMITS } from './core/knowledge.ts';
 import { CONTEXT_LIMITS } from './core/conversation.ts';
 import { PLAN_LIMITS } from './core/planner.ts';
 import { EVENT } from './core/types.ts';
+import { createEmbeddingProviderFromEnv } from './core/embeddings.ts';
+import { VectorIndex, searchMode } from './core/vector-index.ts';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = resolve(SRC_DIR, '..');
@@ -128,7 +130,7 @@ function providerStatus(provider) {
   };
 }
 
-export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
+export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
   const registry = new AgentRegistry(DEFAULT_AGENTS);
   const store = new JsonStore(dataFile, { seedAgents: registry.list() });
   await store.init();
@@ -141,15 +143,17 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   if (store.listThreads().length === 0) {
     await store.createThread({ title: '欢迎来到 Orbit Agent', activeAgentId: registry.default()?.id });
   }
-  const memory = new MemoryService(store);
-  const knowledge = new KnowledgeService(store);
+  const vectors = await new VectorIndex(`${dataFile}.vectors.json`, embeddingProvider === undefined ? createEmbeddingProviderFromEnv() : embeddingProvider,
+    { minScore: process.env.ORBIT_EMBEDDING_MIN_SCORE?.trim() ? Number(process.env.ORBIT_EMBEDDING_MIN_SCORE) : 0.3 }).init();
+  const memory = new MemoryService(store, vectors);
+  const knowledge = new KnowledgeService(store, vectors);
   const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
   const skills = await new SkillRegistry().loadDirectory(SKILLS_DIR);
   const orchestrator = new Orchestrator({ store, registry, memory, knowledge, provider: providerRuntime, tools, skills,
     loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', ...loopOptions },
   });
 
-  const runtime = { store, registry, memory, knowledge, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
+  const runtime = { store, registry, memory, knowledge, vectors, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
   const requireThread = (threadId) => {
     const thread = store.getThread(threadId);
     if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
@@ -195,7 +199,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           collaboration: COLLABORATION_LIMITS,
           planning: PLAN_LIMITS,
           context: CONTEXT_LIMITS,
-          knowledge: { method: 'bm25', limits: KNOWLEDGE_LIMITS },
+          knowledge: { method: vectors.enabled ? 'hybrid' : 'bm25', limits: KNOWLEDGE_LIMITS },
+          retrieval: vectors.describe(),
         });
         return;
       }
@@ -309,11 +314,29 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         });
         return;
       }
+      if (method === 'GET' && pathname === '/api/retrieval') {
+        const threadId = requestUrl.searchParams.get('threadId') || undefined;
+        if (threadId) requireThread(threadId);
+        sendJson(response, 200, { ...vectors.describe(), knowledge: knowledge.indexStatus({ threadId }), memory: memory.indexStatus({ threadId }) });
+        return;
+      }
+      if (method === 'POST' && pathname === '/api/retrieval/reindex') {
+        if (!vectors.enabled) throw Object.assign(new Error('Configure ORBIT_EMBEDDING_MODEL before building a vector index.'), { code: 'VALIDATION_ERROR' });
+        const body = await readJson(request);
+        if (body.threadId !== undefined && (typeof body.threadId !== 'string' || !body.threadId.trim())) throw Object.assign(new Error('threadId must be a non-empty string'), { code: 'VALIDATION_ERROR' });
+        const threadId = body.threadId;
+        if (threadId) requireThread(threadId);
+        const knowledgeResult = await knowledge.reindex({ threadId });
+        const memoryResult = await memory.reindex({ threadId });
+        sendJson(response, 200, { ...vectors.describe(), knowledge: knowledgeResult, memory: memoryResult });
+        return;
+      }
       if (parts[0] === 'api' && parts[1] === 'knowledge') {
         const threadId = requestUrl.searchParams.get('threadId') || undefined;
         if (threadId) requireThread(threadId);
         if (method === 'GET' && pathname === '/api/knowledge/search') {
-          sendJson(response, 200, { hits: knowledge.search(requestUrl.searchParams.get('q') ?? '', { threadId, limit: Number(requestUrl.searchParams.get('limit')) || 5 }), method: 'bm25' });
+          sendJson(response, 200, await knowledge.searchWithMetadata(requestUrl.searchParams.get('q') ?? '', {
+            threadId, limit: Number(requestUrl.searchParams.get('limit')) || 5, mode: searchMode(requestUrl.searchParams.get('mode')) }));
           return;
         }
         if (parts[2] === 'documents' && parts.length === 3) {
@@ -336,8 +359,11 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
       if (method === 'GET' && pathname === '/api/memories') {
         const query = requestUrl.searchParams.get('q');
         const threadId = requestUrl.searchParams.get('threadId') || undefined;
-        const memories = query ? memory.search(query, { threadId, limit: 20 }) : store.listMemories({ threadId, limit: 100 });
-        sendJson(response, 200, { memories });
+        if (threadId) requireThread(threadId);
+        if (query) {
+          const { hits, ...retrieval } = await memory.searchWithMetadata(query, { threadId, limit: 20, mode: searchMode(requestUrl.searchParams.get('mode')) });
+          sendJson(response, 200, { memories: hits, ...retrieval });
+        } else sendJson(response, 200, { memories: store.listMemories({ threadId, limit: 100 }) });
         return;
       }
       if (method === 'POST' && pathname === '/api/memories') {

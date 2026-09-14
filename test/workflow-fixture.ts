@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { createApp } from '../src/server.ts';
 import { LocalProvider } from '../src/core/providers.ts';
 
-export async function workflowFixture(t, provider = new LocalProvider({ latencyMs: 0 })) {
+export async function workflowFixture(t, provider = new LocalProvider({ latencyMs: 0 }), embeddingProvider = null) {
   const root = await mkdtemp(join(tmpdir(), 'orbit-workflow-test-'));
   let server;
   t.after(async () => {
@@ -19,7 +19,7 @@ export async function workflowFixture(t, provider = new LocalProvider({ latencyM
   });
   await writeFile(join(root, 'evidence.txt'), 'Release Quartz\nchecksum: b12\n预算上限：48000 元\n');
   const dataFile = join(root, 'state.json');
-  const app = await createApp({ dataFile, workspaceRoot: root, provider });
+  const app = await createApp({ dataFile, workspaceRoot: root, provider, embeddingProvider });
   server = app.server;
   return { ...app.runtime, server, root, dataFile, threadId: app.runtime.store.listThreads()[0].id };
 }

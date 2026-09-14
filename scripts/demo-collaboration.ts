@@ -30,7 +30,7 @@ const parent = resolve(tmpdir());
 const root = await mkdtemp(join(parent, 'orbit-collaboration-demo-'));
 try {
   await writeFile(join(root, 'evidence.txt'), 'Orbit 的每轮委派最多 2 次，深度最多 1 层。');
-  const { runtime } = await createApp({ provider, workspaceRoot: root, dataFile: join(root, 'state.json') });
+  const { runtime } = await createApp({ provider, embeddingProvider: null, workspaceRoot: root, dataFile: join(root, 'state.json') });
   const threadId = runtime.store.listThreads()[0].id;
   console.log('离线协议演示：模型决策使用固定脚本；工具、委派、回传、讨论与持久化使用真实运行时。');
   const delegated = await runtime.orchestrator.submitMessage(threadId, '@atlas 请 Forge 提出建议，再请 Lens 复核，最后汇总。');

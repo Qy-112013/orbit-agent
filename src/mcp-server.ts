@@ -4,6 +4,9 @@ import { createDefaultTools, ToolRegistry } from './core/tools.ts';
 import { MemoryService } from './core/memory.ts';
 import { JsonStore } from './core/store.ts';
 import { SkillRegistry } from './core/skills.ts';
+import { KnowledgeService } from './core/knowledge.ts';
+import { createEmbeddingProviderFromEnv } from './core/embeddings.ts';
+import { VectorIndex } from './core/vector-index.ts';
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -69,12 +72,20 @@ export function createMcpHandler(tools: ToolRegistry, skills?: SkillRegistry) {
   };
 }
 
-export async function startMcpServer(): Promise<void> {
-  const store = new JsonStore(fileURLToPath(new URL('../data/mcp-state.json', import.meta.url)));
+export async function createMcpRuntime({ dataFile = fileURLToPath(new URL('../data/mcp-state.json', import.meta.url)), workspaceRoot = process.cwd(), embeddingProvider } = {}) {
+  const store = new JsonStore(dataFile);
   await store.init();
-  const memory = new MemoryService(store);
-  const tools = createDefaultTools({ memory, store, workspaceRoot: process.cwd() });
+  const vectors = await new VectorIndex(`${dataFile}.vectors.json`, embeddingProvider === undefined ? createEmbeddingProviderFromEnv() : embeddingProvider,
+    { minScore: process.env.ORBIT_EMBEDDING_MIN_SCORE?.trim() ? Number(process.env.ORBIT_EMBEDDING_MIN_SCORE) : 0.3 }).init();
+  const memory = new MemoryService(store, vectors);
+  const knowledge = new KnowledgeService(store, vectors);
+  const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
   const skills = await new SkillRegistry().loadDirectory(fileURLToPath(new URL('../skills/', import.meta.url)));
+  return { store, memory, knowledge, vectors, tools, skills };
+}
+
+export async function startMcpServer(): Promise<void> {
+  const { tools, skills } = await createMcpRuntime();
   const handle = createMcpHandler(tools, skills);
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {

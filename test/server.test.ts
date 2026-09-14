@@ -8,7 +8,7 @@ import { createApp } from '../src/server.ts';
 test('serves health, bootstrap and a complete message turn', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'orbit-agent-server-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const { server } = await createApp({ dataFile: join(root, 'state.json') });
+  const { server } = await createApp({ dataFile: join(root, 'state.json'), embeddingProvider: null });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);

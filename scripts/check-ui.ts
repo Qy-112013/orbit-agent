@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createApp } from '../src/server.ts';
 import { createWorkflowDemoProvider } from './workflow-demo-provider.ts';
+import { embeddingFixture } from '../test/embedding-fixture.ts';
+import { KnowledgeService } from '../src/core/knowledge.ts';
 
 // Uses an installed Chromium browser and its local DevTools protocol. No npm
 // browser dependency, real provider, personal browser profile or user data.
@@ -63,7 +65,8 @@ try {
   for (const candidate of candidates) { try { await access(candidate); command = candidate; break; } catch { /* next installation */ } }
   if (!command) throw new Error('Install Chrome/Edge/Chromium or set ORBIT_BROWSER_COMMAND to its executable path.');
   await mkdir(output, { recursive: true });
-  const app = await createApp({ dataFile: join(root, 'state.json'), workspaceRoot: root, provider: createWorkflowDemoProvider(), loopOptions: { toolsEnabled: true } });
+  const embedding = embeddingFixture();
+  const app = await createApp({ dataFile: join(root, 'state.json'), workspaceRoot: root, provider: createWorkflowDemoProvider(), embeddingProvider: embedding, loopOptions: { toolsEnabled: true } });
   server = app.server;
   const threadA = app.runtime.store.listThreads()[0].id;
   await app.runtime.store.updateThread(threadA, { title: '会话 A · Quartz 发布' });
@@ -173,9 +176,35 @@ try {
   await set('#thread-search', '独立分支');
   await evaluate('document.querySelector("#thread-search").dispatchEvent(new Event("input", { bubbles: true }))');
   await when(`${state}.threads.length === 1`, 'thread search');
+
+  console.log('UI: semantic search, index backfill and embedding failure recovery');
+  const semanticThreadId = await evaluate(`${state}.currentThread.id`);
+  await new KnowledgeService(app.runtime.store).importDocument({ title: 'Transport handbook', content: 'A bicycle is useful for commuting.', threadId: semanticThreadId });
+  await app.runtime.store.addMemory({ text: 'Cycling is my preferred transport.', threadId: semanticThreadId });
+  await selectThread(semanticThreadId);
+  assert.equal(app.runtime.knowledge.indexStatus({ threadId: semanticThreadId }).pending, 1);
+  assert.equal(await evaluate('document.querySelector("#reindex-knowledge").classList.contains("hidden")'), false);
+  await click('#reindex-knowledge');
+  await when(`!${state}.reindexing && ${state}.knowledgeRetrieval?.index?.pending === 0`, 'index backfill');
+  assert.equal(app.runtime.memory.indexStatus({ threadId: semanticThreadId }).pending, 0);
+  await set('#knowledge-query', '两轮通勤工具');
+  await evaluate('document.querySelector("#knowledge-search").requestSubmit()');
+  await when(`${state}.knowledgeHits[0]?.title === 'Transport handbook' && ${state}.knowledgeRetrieval?.method === 'hybrid'`, 'semantic match without shared words');
+  assert.match(await evaluate('document.querySelector("#knowledge-results").textContent'), /bicycle/);
+  assert.match(await evaluate('document.querySelector("#knowledge-method").textContent'), /语义/);
+  embedding.fail = true;
+  await set('#knowledge-query', 'bicycle');
+  await evaluate('document.querySelector("#knowledge-search").requestSubmit()');
+  await when(`${state}.knowledgeRetrieval?.method === 'bm25' && ${state}.knowledgeRetrieval?.fallbackReason`, 'embedding fallback');
+  assert.match(await evaluate('document.querySelector("#knowledge-method").textContent'), /已使用关键词/);
+  assert.equal(await evaluate(`${state}.knowledgeHits.length`), 1);
+  embedding.fail = false;
+  await click('#reindex-knowledge');
+  await when(`!${state}.reindexing && ${state}.knowledgeRetrieval?.method === 'hybrid' && !${state}.knowledgeRetrieval?.fallbackReason`, 'embedding recovery');
+  await capture('embedding.png');
   assert.equal(await evaluate('Boolean(window.__orbitUnsafe)'), false);
   assert.deepEqual(cdp.errors, [], 'browser console must have no uncaught exceptions');
-  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, provider: 'scripted-demo', realModelCalls: 0, checks: ['document import', 'source escaping', 'retrieval citations', 'late-response isolation', 'per-thread drafts', 'plan/review/replan', 'desktop layout', 'rename', 'branch', 'archive/restore', 'thread search'], screenshots: ['desktop.png'], consoleErrors: cdp.errors }, null, 2));
+  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, provider: 'scripted-demo', embedding: 'deterministic-fixture', realModelCalls: 0, checks: ['document import', 'source escaping', 'retrieval citations', 'late-response isolation', 'per-thread drafts', 'plan/review/replan', 'desktop layout', 'rename', 'branch', 'archive/restore', 'thread search', 'semantic retrieval', 'index backfill', 'embedding fallback/recovery'], screenshots: ['desktop.png', 'embedding.png'], consoleErrors: cdp.errors }, null, 2));
   console.log(`UI smoke passed. Artifacts: ${output}`);
 } catch (error) {
   if (browserError && !cdp) console.error(browserError);
