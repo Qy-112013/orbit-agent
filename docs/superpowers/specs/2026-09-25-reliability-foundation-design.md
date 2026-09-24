@@ -15,7 +15,8 @@
 
 ## 1. AnthropicProvider（`src/core/anthropic-provider.ts`）
 
-- 实现 `ProviderAdapter`，`id = 'anthropic'`。构造参数：`apiKey`、`model`（默认 `claude-opus-5`）、`effort`（默认 `high`）、`maxTokens`（默认 16000）、`timeoutMs`（默认 45000）、`maxRetries`（默认 2）、可选 `fetch`（测试注入）。
+- 实现 `ProviderAdapter`，`id = 'anthropic'`。构造参数：`apiKey`、`model`（默认 `claude-opus-5`）、`effort`（默认 `high`）、`maxTokens`（默认 16000）、`timeoutMs`（默认 300000）、`maxRetries`（默认 2）、可选 `fetch`（测试注入）。
+- 超时取 5 分钟而非沿用 45 秒：本子项目仍是非流式请求，adaptive thinking + `high` effort 在 16000 max_tokens 下单次响应常超过 45 秒；可用 `ANTHROPIC_TIMEOUT_MS` 覆盖。子项目 2 改为流式后再收紧。
 - 请求：`client.beta.messages.create`，`thinking: {type: 'adaptive'}`，`output_config: {effort}`，`betas: ['server-side-fallback-2026-07-01']`，`fallbacks: 'default'`。
 - system 为单个 text block：agent systemPrompt + skills + `EVIDENCE_INSTRUCTIONS`，带 `cache_control: {type: 'ephemeral'}`；另设顶层 `cache_control: {type: 'ephemeral'}` 缓存历史前缀。
 - 消息顺序：历史消息（role 映射同 OpenAI 实现，连续同角色允许）→ 本轮 user 消息（reference context 拼在问题之前）→ transcript。
@@ -29,9 +30,17 @@
 
 - `createProviderFromEnv`：`ORBIT_DEFAULT_PROVIDER`（`anthropic` | `openai`）优先；未设时有 `ANTHROPIC_API_KEY` 且无 `OPENAI_API_KEY` 则用 Anthropic，否则保持现状。
 - 每 Agent：`ORBIT_<AGENT>_PROVIDER=anthropic` 时使用 `ORBIT_<AGENT>_API_KEY` 或 `ANTHROPIC_API_KEY`，模型取 `ORBIT_<AGENT>_MODEL` 或 `ANTHROPIC_MODEL`。
-- 环境变量：`ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`、`ANTHROPIC_EFFORT`、`ORBIT_DEFAULT_PROVIDER`，写入 `.env.example`。
+- 与 OpenAI 实现一致，默认与每 Agent 注册的 Anthropic provider 都包在 `FallbackProvider` 中。
+- 同一 run 内 provider 固定（由 `ProviderRegistry.resolve` 按 agent 决定），`providerState` 只会回传给产生它的 provider；若 run 中途发生 LocalProvider fallback，Local 忽略 `providerState`。
+- 环境变量：`ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`、`ANTHROPIC_EFFORT`、`ANTHROPIC_TIMEOUT_MS`、`ORBIT_DEFAULT_PROVIDER`，写入 `.env.example`。
 
 ## 2. Prompt caching
+
+**预期收益的边界（基于现状代码）：**
+- 当前 agent systemPrompt + skills 远小于最小可缓存前缀（1024–4096 tokens），system 断点单独不会命中。
+- `conversationContext` 是 12 条消息的滑动窗口，线程超过 12 条后每轮历史前缀都会平移，**跨轮次缓存基本无效**。
+- 真正可命中的是**单个 run 内的 agent loop**：最多 5 次模型调用共享 tools + system + 历史 + 追加式 transcript，前缀严格增长。顶层自动缓存正是覆盖这一场景。
+- 因此本子项目只承诺"run 内缓存命中 + usage 可观测"；改造滑动窗口为分块稳定前缀属于子项目 2（LLM 压缩）的职责。
 
 - `OpenAICompatibleProvider` 同步调整消息顺序：reference context 从历史之前移到本轮 user 消息内（问题之前），使 system + 历史成为稳定前缀，tools 同样按名称排序。
 - usage 归一化为 `{promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens}`：
@@ -51,7 +60,8 @@
 
 - `ProviderInput` 新增 `responseSchema?: { name: string; schema: Record<string, unknown> }`。
 - `planner.ts` 将 plan / review schema 提取为导出函数 `planSchema(participants)`、`REVIEW_SCHEMA`，在 planning 与 review 调用时传入 `responseSchema`；带 schema 的调用不传 tools。
-- `src/core/structured-output.ts` 的 `toProviderSchema(schema)`：递归移除 `minLength`、`maxLength`、`maxItems`、`minItems`、`pattern`、`format` 等关键字，确保每个 object 有 `additionalProperties: false`，且 `required` 覆盖全部 properties（OpenAI strict 要求）。
+- `src/core/structured-output.ts` 的 `toProviderSchema(schema)`：递归移除 `minLength`、`maxLength`、`maxItems`、`minItems`、`pattern`、`format` 等关键字（保留 `enum`，planner 的 owner 约束依赖它），确保每个 object 有 `additionalProperties: false`。
+- OpenAI strict 要求 `required` 覆盖全部 properties。若原 schema 存在非必填属性，`toProviderSchema` 抛错而不是悄悄改为必填——避免改变语义；当前 plan / review schema 的属性均为必填，不触发。
 - Anthropic：`output_config.format = {type: 'json_schema', schema}`。OpenAI：`response_format = {type: 'json_schema', json_schema: {name, schema, strict: true}}`。
 - CLI / Local provider 忽略该字段。`parsePlan` / `parseReview` 及 `validateToolInput` 保持为最终校验，行为不退化。
 
