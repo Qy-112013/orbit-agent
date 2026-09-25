@@ -297,12 +297,13 @@ export function createProviderRegistryFromEnv(env: NodeJS.ProcessEnv = process.e
 function anthropicFromEnv(env: NodeJS.ProcessEnv, apiKey: string, model?: string, baseUrl?: string): AnthropicProvider {
   const timeoutMs = Number(env.ANTHROPIC_TIMEOUT_MS);
   const configuredModel = model || env.ANTHROPIC_MODEL?.trim();
+  const configuredBaseUrl = baseUrl || env.ANTHROPIC_BASE_URL?.trim();
   return new AnthropicProvider({
     apiKey,
     ...(configuredModel ? { model: configuredModel } : {}),
     ...(env.ANTHROPIC_EFFORT?.trim() ? { effort: env.ANTHROPIC_EFFORT.trim() } : {}),
     ...(timeoutMs > 0 ? { timeoutMs } : {}),
-    ...(baseUrl ? { baseUrl } : {}),
+    ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
   });
 }
 

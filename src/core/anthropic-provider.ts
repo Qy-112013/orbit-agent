@@ -6,6 +6,7 @@ import type { AgentTurnMessage, ProviderInput, ProviderResult, ProviderUsage, To
 
 export const ANTHROPIC_DEFAULTS = Object.freeze({ model: 'claude-opus-5', effort: 'high', maxTokens: 16_000, timeoutMs: 300_000, maxRetries: 2 });
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
+export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
 
 type Block = Record<string, any>;
 type ApiMessage = { role: 'user' | 'assistant'; content: string | Block[] };
@@ -49,7 +50,9 @@ export class AnthropicProvider implements ProviderAdapter {
     timeoutMs = ANTHROPIC_DEFAULTS.timeoutMs, maxRetries = ANTHROPIC_DEFAULTS.maxRetries, baseUrl, fetch }: {
     apiKey: string; model?: string; effort?: string; maxTokens?: number; timeoutMs?: number; maxRetries?: number; baseUrl?: string; fetch?: typeof globalThis.fetch;
   }) {
-    this.client = new Anthropic({ apiKey, timeout: timeoutMs, maxRetries, ...(baseUrl ? { baseURL: baseUrl } : {}), ...(fetch ? { fetch } : {}) });
+    // Pass endpoint and credentials explicitly: the SDK would otherwise pick up ambient
+    // ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN and send credentials to an unintended endpoint.
+    this.client = new Anthropic({ apiKey, authToken: null, baseURL: baseUrl ?? ANTHROPIC_DEFAULT_BASE_URL, timeout: timeoutMs, maxRetries, ...(fetch ? { fetch } : {}) });
     this.model = model;
     this.effort = effort;
     this.maxTokens = maxTokens;

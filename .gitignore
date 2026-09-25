@@ -15,3 +15,7 @@ node_modules/
 /docs/*interview*.md
 /docs/*简历*.md
 /docs/*面试*.md
+
+# Local secrets
+.env
+.env.local

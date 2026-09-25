@@ -87,6 +87,22 @@ test('usage normalization tolerates missing fields', () => {
   assert.deepEqual(anthropicUsage({ input_tokens: 5, output_tokens: 1 }), { promptTokens: 5, completionTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 });
 });
 
+test('ignores ambient SDK endpoint and bearer credentials', async (t) => {
+  const saved = { url: process.env.ANTHROPIC_BASE_URL, token: process.env.ANTHROPIC_AUTH_TOKEN };
+  process.env.ANTHROPIC_BASE_URL = 'https://relay.invalid';
+  process.env.ANTHROPIC_AUTH_TOKEN = 'ambient-token';
+  t.after(() => {
+    for (const [key, value] of [['ANTHROPIC_BASE_URL', saved.url], ['ANTHROPIC_AUTH_TOKEN', saved.token]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const { requests, provider } = fixture([{ content: [{ type: 'text', text: 'ok' }] }]);
+  await provider.complete({ agent, content: 'x', context });
+  assert.match(requests[0].url, /^https:\/\/api\.anthropic\.com\//);
+  assert.equal(requests[0].headers.get('authorization'), null);
+  assert.equal(requests[0].headers.get('x-api-key'), 'test-key');
+});
+
 test('selects Anthropic as default only when configured or when it is the only key', () => {
   assert.match(createProviderFromEnv({ ANTHROPIC_API_KEY: 'a' }).id, /^anthropic/);
   assert.match(createProviderFromEnv({ ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' }).id, /^openai-compatible/);
