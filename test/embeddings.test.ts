@@ -97,7 +97,8 @@ test('remote errors are sanitized and invalid inputs do not make network calls',
   await assert.rejects(provider.embed([' ']), { code: 'EMBEDDING_INVALID_INPUT' });
   await assert.rejects(provider.embed(['x'.repeat(EMBEDDING_LIMITS.inputChars + 1)]), { code: 'EMBEDDING_INVALID_INPUT' });
   assert.deepEqual(await provider.embed([]), []);
-  assert.equal(calls, 1);
+  // One request plus two retries for the transient 503; invalid inputs never reach the network.
+  assert.equal(calls, 3);
 });
 
 test('an unresponsive embedding endpoint is aborted within the configured timeout', async (t) => {

@@ -3,6 +3,7 @@ import type { ProviderAdapter } from './contracts.ts';
 import { validateToolInput, type ToolRegistry } from './tools.ts';
 import type { ToolDefinition } from './types.ts';
 import { referencedCitations, toolCitations } from './context-format.ts';
+import { planSchema, REVIEW_SCHEMA } from './planner.ts';
 
 export interface LoopLimits { maxSteps: number; maxToolCalls: number; maxResultChars: number }
 export const DEFAULT_LOOP_LIMITS: Readonly<LoopLimits> = Object.freeze({ maxSteps: 5, maxToolCalls: 8, maxResultChars: 8_000 });
@@ -73,8 +74,13 @@ export class AgentLoop {
   }
 
   async run(input: ProviderInput, execution: { threadId: string; runId: string }, emit: EventSink, runTools: RunTool[] = []): Promise<ProviderResult> {
-    const extensions = this.toolsEnabled ? runTools : [];
-    const definitions = [...this.definitions(), ...extensions.map(({ execute, ...definition }) => definition)];
+    const workflow = input.context.workflow;
+    // Structured workflow phases answer with one JSON object and never call tools.
+    const responseSchema = workflow
+      ? workflow.kind === 'planning' ? { name: 'plan', schema: planSchema(workflow.participants) } : { name: 'review', schema: { ...REVIEW_SCHEMA } }
+      : undefined;
+    const extensions = this.toolsEnabled && !responseSchema ? runTools : [];
+    const definitions = responseSchema ? [] : [...this.definitions(), ...extensions.map(({ execute, ...definition }) => definition)];
     const allowed = new Set(definitions.map((tool) => tool.name));
     // Each run owns its transcript, including concurrent agents.
     const transcript: AgentTurnMessage[] = [];
@@ -88,7 +94,7 @@ export class AgentLoop {
     for (let step = 1; step <= this.limits.maxSteps; step += 1) {
       const startedAt = Date.now();
       await publish(EVENT.AGENT_STEP_STARTED, { step });
-      const result = await this.provider.complete({ ...input, tools: definitions, transcript: structuredClone(transcript) });
+      const result = await this.provider.complete({ ...input, tools: definitions, transcript: structuredClone(transcript), ...(responseSchema ? { responseSchema } : {}) });
       if (result.toolCalls !== undefined && !Array.isArray(result.toolCalls)) {
         throw loopError('INVALID_TOOL_CALL', '模型的 toolCalls 必须是数组。');
       }
@@ -126,6 +132,7 @@ export class AgentLoop {
       transcript.push({
         role: 'assistant', content: typeof result.content === 'string' ? result.content : '', toolCalls: structuredClone(calls),
         ...(typeof result.reasoningContent === 'string' ? { reasoningContent: result.reasoningContent } : {}),
+        ...(result.providerState !== undefined ? { providerState: result.providerState } : {}),
       });
       for (const call of calls) {
         seen.add(call.id);

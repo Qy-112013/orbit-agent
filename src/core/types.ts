@@ -243,12 +243,21 @@ export interface ProviderResult {
   content: string;
   /** Provider protocol state; retained within a run, never published to the UI. */
   reasoningContent?: string;
+  providerState?: unknown;
   toolCalls?: ToolCall[];
   citations?: unknown[];
   provider?: string;
   model?: string;
+  /** API providers report ProviderUsage; CLI providers pass through their native shape. */
   usage?: unknown;
   metadata?: Record<string, unknown>;
+}
+
+export interface ProviderUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 export interface ToolDefinition {
@@ -267,7 +276,9 @@ export interface ToolCall {
 
 /** Model/tool exchanges belong to a single run, separate from thread history. */
 export type AgentTurnMessage =
-  | { role: 'assistant'; content: string; toolCalls: ToolCall[]; reasoningContent?: string }
+  | { role: 'assistant'; content: string; toolCalls: ToolCall[]; reasoningContent?: string;
+      /** Raw provider content blocks (e.g. Anthropic thinking); replayed only to the provider that produced them. */
+      providerState?: unknown }
   | { role: 'tool'; toolCallId: string; content: string };
 
 export interface ProviderInput {
@@ -276,6 +287,8 @@ export interface ProviderInput {
   context: ProviderContext;
   tools?: ToolDefinition[];
   transcript?: AgentTurnMessage[];
+  /** Constrains the final answer to JSON; providers without support ignore it. */
+  responseSchema?: { name: string; schema: Record<string, unknown> };
 }
 
 export interface ProviderContext {

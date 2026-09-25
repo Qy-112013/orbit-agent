@@ -26,6 +26,16 @@ function recentConversation(context) {
 import type { Agent, ProviderContext, ProviderInput, ProviderResult } from './types.ts';
 import type { ProviderAdapter } from './contracts.ts';
 import { createCliProvider, defaultCliCwd, type CliProvider } from './cli-provider.ts';
+import { AnthropicProvider } from './anthropic-provider.ts';
+import { fetchWithRetry } from './retry.ts';
+import { toProviderSchema } from './structured-output.ts';
+import type { ProviderUsage } from './types.ts';
+
+export function openAIUsage(usage: any): ProviderUsage | null {
+  if (!usage) return null;
+  return { promptTokens: usage.prompt_tokens ?? 0, completionTokens: usage.completion_tokens ?? 0,
+    cacheReadTokens: usage.prompt_tokens_details?.cached_tokens ?? 0, cacheWriteTokens: 0 };
+}
 
 /** Deterministic offline provider; makes the project demoable without secrets. */
 export class LocalProvider implements ProviderAdapter {
@@ -87,45 +97,51 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
   private baseUrl: string;
   private model: string;
   private timeoutMs: number;
+  private maxRetries: number;
+  private sleep?: (ms: number) => Promise<unknown>;
 
-  constructor({ apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', timeoutMs = 45_000 }: { apiKey?: string; baseUrl?: string; model?: string; timeoutMs?: number } = {}) {
+  constructor({ apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', timeoutMs = 45_000, maxRetries = 2, sleep }: {
+    apiKey?: string; baseUrl?: string; model?: string; timeoutMs?: number; maxRetries?: number; sleep?: (ms: number) => Promise<unknown>;
+  } = {}) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.model = model;
     this.timeoutMs = timeoutMs;
+    this.maxRetries = maxRetries;
+    this.sleep = sleep;
   }
 
-  async complete({ agent, content, context, tools = [], transcript = [] }: ProviderInput): Promise<ProviderResult> {
+  async complete({ agent, content, context, tools = [], transcript = [], responseSchema }: ProviderInput): Promise<ProviderResult> {
     if (!this.apiKey) throw new Error('OPENAI_API_KEY is not configured');
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const reference = formatReferenceContext(context);
+    // Stable prefix first so automatic prefix caching can hit; per-turn reference context goes last.
     const messages = [
       { role: 'system', content: [
         agent?.systemPrompt ?? 'You are a helpful assistant.',
         ...(context.skills ?? []).map((skill) => `Skill: ${skill.name}\n${skill.content}`),
         EVIDENCE_INSTRUCTIONS,
       ].join('\n\n') },
-      ...(formatReferenceContext(context) ? [{ role: 'user', content: `Reference context:\n${formatReferenceContext(context)}` }] : []),
       ...(context.recentMessages ?? []).map((message) => ({
         role: message.role === 'assistant' ? 'assistant' : 'user',
         content: `${message.agentId ? '[' + message.agentId + '] ' : message.role === 'system' ? '[Thread note] ' : ''}${message.content}`,
       })),
-      { role: 'user', content },
+      { role: 'user', content: reference ? `Reference context:\n${reference}\n\n${content}` : content },
       ...transcript.map((message) => message.role === 'tool'
         ? { role: 'tool', tool_call_id: message.toolCallId, content: message.content }
         : { role: 'assistant', content: message.content || null,
           ...(typeof message.reasoningContent === 'string' ? { reasoning_content: message.reasoningContent } : {}),
           tool_calls: message.toolCalls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })) }),
     ];
-    try {
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    {
+      const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+      const { response, attempts } = await fetchWithRetry(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
         body: JSON.stringify({ model: this.model, messages, temperature: 0.2,
-          ...(tools.length ? { tools: tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })), tool_choice: 'auto' } : {}),
+          ...(sortedTools.length ? { tools: sortedTools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })), tool_choice: 'auto' } : {}),
+          ...(responseSchema ? { response_format: { type: 'json_schema', json_schema: { name: responseSchema.name, schema: toProviderSchema(responseSchema.schema), strict: true } } } : {}),
         }),
-        signal: controller.signal,
-      });
+      }, { timeoutMs: this.timeoutMs, maxRetries: this.maxRetries, ...(this.sleep ? { sleep: this.sleep } : {}) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload?.error?.message || `provider returned HTTP ${response.status}`);
       const contentValue = payload?.choices?.[0]?.message?.content;
@@ -149,10 +165,9 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
         citations: referencedCitations(text, context?.citations ?? []),
         provider: 'openai-compatible',
         model: payload?.model ?? this.model,
-        usage: payload?.usage ?? null,
+        usage: openAIUsage(payload?.usage),
+        metadata: { attempts },
       };
-    } finally {
-      clearTimeout(timeout);
     }
   }
 }
@@ -263,6 +278,11 @@ export function createProviderRegistryFromEnv(env: NodeJS.ProcessEnv = process.e
     const apiKey = env[`${prefix}API_KEY`]?.trim();
     const baseUrl = env[`${prefix}BASE_URL`]?.trim();
     const model = env[`${prefix}MODEL`]?.trim();
+    if (configuredProvider === 'anthropic') {
+      const anthropicKey = apiKey || env.ANTHROPIC_API_KEY?.trim();
+      if (anthropicKey) registry.register(agent.id, new FallbackProvider(anthropicFromEnv(env, anthropicKey, model, baseUrl)));
+      continue;
+    }
     if (!apiKey && !baseUrl && !model) continue;
     if (!apiKey) continue;
     registry.register(agent.id, new FallbackProvider(new OpenAICompatibleProvider({
@@ -274,8 +294,25 @@ export function createProviderRegistryFromEnv(env: NodeJS.ProcessEnv = process.e
   return registry;
 }
 
+function anthropicFromEnv(env: NodeJS.ProcessEnv, apiKey: string, model?: string, baseUrl?: string): AnthropicProvider {
+  const timeoutMs = Number(env.ANTHROPIC_TIMEOUT_MS);
+  const configuredModel = model || env.ANTHROPIC_MODEL?.trim();
+  return new AnthropicProvider({
+    apiKey,
+    ...(configuredModel ? { model: configuredModel } : {}),
+    ...(env.ANTHROPIC_EFFORT?.trim() ? { effort: env.ANTHROPIC_EFFORT.trim() } : {}),
+    ...(timeoutMs > 0 ? { timeoutMs } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+  });
+}
+
 export function createProviderFromEnv(env: NodeJS.ProcessEnv = process.env): FallbackProvider {
   const local = new LocalProvider();
+  const anthropicKey = env.ANTHROPIC_API_KEY?.trim();
+  const preferred = env.ORBIT_DEFAULT_PROVIDER?.trim().toLowerCase();
+  if (anthropicKey && (preferred === 'anthropic' || (!preferred && !env.OPENAI_API_KEY?.trim()))) {
+    return new FallbackProvider(anthropicFromEnv(env, anthropicKey), local);
+  }
   const apiKey = env.OPENAI_API_KEY?.trim();
   if (!apiKey) return new FallbackProvider(null, local);
   return new FallbackProvider(

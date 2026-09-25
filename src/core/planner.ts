@@ -15,15 +15,23 @@ function parseObject(text: string): Record<string, any> {
   return result;
 }
 
-export function parsePlan(text: string, participants: string[]): PlanStep[] {
-  const result = parseObject(text);
-  validateToolInput({ type: 'object', properties: { steps: { type: 'array', maxItems: PLAN_LIMITS.maxSteps, items: {
+export function planSchema(participants: string[]): Record<string, unknown> {
+  return { type: 'object', properties: { steps: { type: 'array', maxItems: PLAN_LIMITS.maxSteps, items: {
     type: 'object', properties: {
       id: { type: 'string', minLength: 1, maxLength: 32 }, title: { type: 'string', minLength: 1, maxLength: 300 },
       owner: { type: 'string', enum: participants }, dependsOn: { type: 'array', maxItems: PLAN_LIMITS.maxSteps, items: { type: 'string' } },
       acceptance: { type: 'string', minLength: 1, maxLength: 1200 },
     }, required: ['id', 'title', 'owner', 'dependsOn', 'acceptance'], additionalProperties: false,
-  } } }, required: ['steps'], additionalProperties: false }, result);
+  } } }, required: ['steps'], additionalProperties: false };
+}
+
+export const REVIEW_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({ type: 'object', properties: {
+  verdict: { type: 'string', enum: ['pass', 'revise', 'blocked'] }, feedback: { type: 'string', minLength: 1, maxLength: 4000 },
+}, required: ['verdict', 'feedback'], additionalProperties: false });
+
+export function parsePlan(text: string, participants: string[]): PlanStep[] {
+  const result = parseObject(text);
+  validateToolInput(planSchema(participants), result);
   if (!result.steps.length) throw new Error('plan must have at least one step');
   const seen = new Set<string>();
   return result.steps.map((step) => {
@@ -38,9 +46,7 @@ export function parsePlan(text: string, participants: string[]): PlanStep[] {
 
 export function parseReview(text: string): Pick<PlanReview, 'verdict' | 'feedback'> {
   const result = parseObject(text);
-  validateToolInput({ type: 'object', properties: {
-    verdict: { type: 'string', enum: ['pass', 'revise', 'blocked'] }, feedback: { type: 'string', minLength: 1, maxLength: 4000 },
-  }, required: ['verdict', 'feedback'], additionalProperties: false }, result);
+  validateToolInput(REVIEW_SCHEMA, result);
   return { verdict: result.verdict, feedback: result.feedback };
 }
 
