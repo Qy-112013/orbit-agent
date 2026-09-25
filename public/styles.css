@@ -128,6 +128,8 @@ code { padding: 2px 5px; border-radius: 4px; color: #c7bcff; background: rgba(16
 .message-content { border: 1px solid var(--border); border-radius: 4px 12px 12px 12px; padding: 12px 14px; color: #dbe0f0; background: var(--surface-raised); font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message.user .message-content { border-color: rgba(166,149,255,.22); border-radius: 12px 4px 12px 12px; color: #f2efff; background: #25213d; }
 .message.system .message-content { border-color: rgba(95,209,176,.16); border-radius: 9px; padding: 8px 13px; color: var(--teal); background: rgba(95,209,176,.06); font-size: 11px; }
+.message.streaming .message-content::after { content: '▍'; margin-left: 2px; color: var(--teal); animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
 .message-footer { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: #59627a; font-size: 10px; }
 .message-footer { flex-wrap: wrap; }
 .message.user .message-footer { justify-content: flex-end; }

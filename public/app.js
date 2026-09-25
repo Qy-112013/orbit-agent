@@ -52,6 +52,8 @@ const state = {
   drafts: new Map(),
   draftModes: new Map(),
   pendingThreads: new Set(),
+  /** runId -> { agentId, step, text }; live previews replaced by persisted messages. */
+  streaming: new Map(),
   threadRefresh: 0,
   listRefresh: 0,
   auxiliaryRefresh: 0,
@@ -204,7 +206,35 @@ function renderThread() {
       </div>
     </article>`;
   }).join('');
+  // A preview ends once its run's message is persisted, or when no run is active anymore.
+  for (const runId of state.streaming.keys()) {
+    if (!state.busy || thread.messages.some((message) => message.metadata?.runId === runId)) state.streaming.delete(runId);
+  }
+  renderStreaming(followTail);
   if (followTail) timeline.scrollTop = timeline.scrollHeight;
+}
+
+function renderStreaming(followTail) {
+  const timeline = $('#timeline');
+  const stick = followTail ?? timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop < 100;
+  for (const node of timeline.querySelectorAll('.message.streaming')) {
+    if (!state.streaming.has(node.dataset.runId)) node.remove();
+  }
+  for (const [runId, preview] of state.streaming) {
+    let node = [...timeline.querySelectorAll('.message.streaming')].find((item) => item.dataset.runId === runId);
+    if (!node) {
+      const agent = agentById(preview.agentId);
+      const name = agent?.name ?? preview.agentId ?? 'Agent';
+      node = document.createElement('article');
+      node.className = 'message assistant streaming';
+      node.dataset.runId = runId;
+      node.innerHTML = `<div class="message-avatar" style="background:${escapeHtml(agent?.color ?? '#a695ff')}">${escapeHtml(agent?.emoji ?? name.slice(0, 1))}</div>
+        <div class="message-body"><div class="message-meta"><span class="message-author">${escapeHtml(name)}</span><span class="message-role">正在生成…</span></div><div class="message-content"></div></div>`;
+      timeline.append(node);
+    }
+    node.querySelector('.message-content').textContent = preview.text;
+  }
+  if (stick) timeline.scrollTop = timeline.scrollHeight;
 }
 
 function citationMarkup(citation) {
@@ -508,6 +538,7 @@ function scheduleRefresh(threadId) {
 
 function connectEvents(threadId) {
   state.source?.close();
+  state.streaming.clear();
   const after = state.events.at(-1)?.sequence ?? 0;
   const source = new EventSource(`/api/threads/${encodeURIComponent(threadId)}/events?after=${after}&stream=1`);
   state.source = source;
@@ -530,6 +561,19 @@ function connectEvents(threadId) {
       }
     });
   }
+  source.addEventListener('agent.delta', (event) => {
+    if (state.source !== source || state.selectedThreadId !== threadId) return;
+    try {
+      // Deltas are ephemeral: they update the live preview and never enter the persisted trace.
+      const { payload } = JSON.parse(event.data);
+      const current = state.streaming.get(payload.runId);
+      const text = current && current.step === payload.step ? current.text + payload.text : payload.text;
+      state.streaming.set(payload.runId, { agentId: payload.agentId, step: payload.step, text });
+      renderStreaming();
+    } catch {
+      // A dropped preview frame is harmless; the persisted message replaces it.
+    }
+  });
   source.addEventListener('ready', (event) => {
     if (state.source !== source || state.selectedThreadId !== threadId) return;
     try { setBusy(Boolean(JSON.parse(event.data).busy) || state.pendingThreads.has(threadId)); } catch { /* next refresh restores the state */ }

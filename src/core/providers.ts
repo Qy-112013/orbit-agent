@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, referencedCitations } from './context-format.ts';
+import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, formatSummary, referencedCitations } from './context-format.ts';
 
 function lastUserMessage(messages = []) {
   return [...messages].reverse().find((message) => message.role === 'user')?.content ?? '';
@@ -98,29 +98,33 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
   private model: string;
   private timeoutMs: number;
   private maxRetries: number;
+  private stream: boolean;
   private sleep?: (ms: number) => Promise<unknown>;
 
-  constructor({ apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', timeoutMs = 45_000, maxRetries = 2, sleep }: {
-    apiKey?: string; baseUrl?: string; model?: string; timeoutMs?: number; maxRetries?: number; sleep?: (ms: number) => Promise<unknown>;
+  constructor({ apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', timeoutMs = 45_000, maxRetries = 2, stream = true, sleep }: {
+    apiKey?: string; baseUrl?: string; model?: string; timeoutMs?: number; maxRetries?: number; stream?: boolean; sleep?: (ms: number) => Promise<unknown>;
   } = {}) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.maxRetries = maxRetries;
+    this.stream = stream;
     this.sleep = sleep;
   }
 
-  async complete({ agent, content, context, tools = [], transcript = [], responseSchema }: ProviderInput): Promise<ProviderResult> {
+  async complete({ agent, content, context, tools = [], transcript = [], responseSchema, onDelta }: ProviderInput): Promise<ProviderResult> {
     if (!this.apiKey) throw new Error('OPENAI_API_KEY is not configured');
-    const reference = formatReferenceContext(context);
-    // Stable prefix first so automatic prefix caching can hit; per-turn reference context goes last.
+    const reference = formatReferenceContext(context, { includeSummary: false });
+    const summary = formatSummary(context.summary);
+    // Stable prefix first (system, summary, history) so automatic prefix caching can hit; per-turn reference context goes last.
     const messages = [
       { role: 'system', content: [
         agent?.systemPrompt ?? 'You are a helpful assistant.',
         ...(context.skills ?? []).map((skill) => `Skill: ${skill.name}\n${skill.content}`),
         EVIDENCE_INSTRUCTIONS,
       ].join('\n\n') },
+      ...(summary ? [{ role: 'user', content: summary }] : []),
       ...(context.recentMessages ?? []).map((message) => ({
         role: message.role === 'assistant' ? 'assistant' : 'user',
         content: `${message.agentId ? '[' + message.agentId + '] ' : message.role === 'system' ? '[Thread note] ' : ''}${message.content}`,
@@ -132,44 +136,109 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
           ...(typeof message.reasoningContent === 'string' ? { reasoning_content: message.reasoningContent } : {}),
           tool_calls: message.toolCalls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })) }),
     ];
-    {
-      const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
-      const { response, attempts } = await fetchWithRetry(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: this.model, messages, temperature: 0.2,
-          ...(sortedTools.length ? { tools: sortedTools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })), tool_choice: 'auto' } : {}),
-          ...(responseSchema ? { response_format: { type: 'json_schema', json_schema: { name: responseSchema.name, schema: toProviderSchema(responseSchema.schema), strict: true } } } : {}),
-        }),
-      }, { timeoutMs: this.timeoutMs, maxRetries: this.maxRetries, ...(this.sleep ? { sleep: this.sleep } : {}) });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.error?.message || `provider returned HTTP ${response.status}`);
-      const contentValue = payload?.choices?.[0]?.message?.content;
-      const text = Array.isArray(contentValue)
-        ? contentValue.map((part) => part?.text ?? '').join('')
-        : String(contentValue ?? '');
-      const rawCalls = payload?.choices?.[0]?.message?.tool_calls ?? [];
-      if (!Array.isArray(rawCalls)) throw new Error('provider returned invalid tool calls');
-      const toolCalls = rawCalls.map((call) => {
-        if (call?.type !== 'function' || typeof call.id !== 'string' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string') {
-          throw new Error('provider returned an invalid function call');
-        }
-        return { id: call.id, name: call.function.name, arguments: call.function.arguments };
-      });
-      if (!text.trim() && !toolCalls.length) throw new Error('provider returned an empty message');
-      return {
-        content: text.trim(),
-        ...(typeof payload?.choices?.[0]?.message?.reasoning_content === 'string'
-          ? { reasoningContent: payload.choices[0].message.reasoning_content } : {}),
-        ...(toolCalls.length ? { toolCalls } : {}),
-        citations: referencedCitations(text, context?.citations ?? []),
-        provider: 'openai-compatible',
-        model: payload?.model ?? this.model,
-        usage: openAIUsage(payload?.usage),
-        metadata: { attempts },
-      };
+    const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+    // Headers must arrive within timeoutMs (retryable); afterwards the body must keep making progress.
+    const idle = new AbortController();
+    const { response, attempts } = await fetchWithRetry(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({ model: this.model, messages, temperature: 0.2,
+        ...(this.stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+        ...(sortedTools.length ? { tools: sortedTools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })), tool_choice: 'auto' } : {}),
+        ...(responseSchema ? { response_format: { type: 'json_schema', json_schema: { name: responseSchema.name, schema: toProviderSchema(responseSchema.schema), strict: true } } } : {}),
+      }),
+    }, { timeoutMs: this.timeoutMs, timeoutScope: 'headers', signal: idle.signal, maxRetries: this.maxRetries, ...(this.sleep ? { sleep: this.sleep } : {}) });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const touch = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => idle.abort(new Error(`provider stream idle for ${this.timeoutMs}ms`)), this.timeoutMs);
+    };
+    let payload: any;
+    try {
+      touch();
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error?.error?.message || `provider returned HTTP ${response.status}`);
+      }
+      // Servers that ignore `stream` answer with plain JSON.
+      payload = (response.headers.get('content-type') ?? '').includes('text/event-stream')
+        ? await readChatStream(response, { onDelta, touch })
+        : await response.json().catch(() => ({}));
+    } catch (error) {
+      throw idle.signal.aborted ? idle.signal.reason : error;
+    } finally {
+      clearTimeout(timer);
+    }
+    const contentValue = payload?.choices?.[0]?.message?.content;
+    const text = Array.isArray(contentValue)
+      ? contentValue.map((part) => part?.text ?? '').join('')
+      : String(contentValue ?? '');
+    const rawCalls = payload?.choices?.[0]?.message?.tool_calls ?? [];
+    if (!Array.isArray(rawCalls)) throw new Error('provider returned invalid tool calls');
+    const toolCalls = rawCalls.map((call) => {
+      if (call?.type !== 'function' || typeof call.id !== 'string' || typeof call.function?.name !== 'string' || typeof call.function?.arguments !== 'string') {
+        throw new Error('provider returned an invalid function call');
+      }
+      return { id: call.id, name: call.function.name, arguments: call.function.arguments };
+    });
+    if (!text.trim() && !toolCalls.length) throw new Error('provider returned an empty message');
+    return {
+      content: text.trim(),
+      ...(typeof payload?.choices?.[0]?.message?.reasoning_content === 'string'
+        ? { reasoningContent: payload.choices[0].message.reasoning_content } : {}),
+      ...(toolCalls.length ? { toolCalls } : {}),
+      citations: referencedCitations(text, context?.citations ?? []),
+      provider: 'openai-compatible',
+      model: payload?.model ?? this.model,
+      usage: openAIUsage(payload?.usage),
+      metadata: { attempts },
+    };
+  }
+}
+
+/** Folds chat-completion SSE chunks into the non-streaming response shape. */
+export async function readChatStream(response: Response, { onDelta, touch }: { onDelta?: (text: string) => void; touch?: () => void } = {}): Promise<any> {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  const calls = new Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }>();
+  let buffer = '';
+  let text = '';
+  let reasoning: string | undefined;
+  let model: string | undefined;
+  let usage: unknown;
+  for (let done = false; !done;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    touch?.();
+    buffer += decoder.decode(chunk.value, { stream: true });
+    for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') { done = true; break; }
+      const event = JSON.parse(data);
+      if (event?.error) throw new Error(event.error.message || 'provider stream returned an error');
+      model ??= event.model;
+      if (event.usage) usage = event.usage;
+      const delta = event.choices?.[0]?.delta ?? {};
+      if (typeof delta.content === 'string' && delta.content) {
+        text += delta.content;
+        onDelta?.(delta.content);
+      }
+      if (typeof delta.reasoning_content === 'string') reasoning = (reasoning ?? '') + delta.reasoning_content;
+      for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
+        const entry = calls.get(call.index) ?? { id: '', type: 'function' as const, function: { name: '', arguments: '' } };
+        if (call.id) entry.id = call.id;
+        if (call.function?.name && !entry.function.name) entry.function.name = call.function.name;
+        if (call.function?.arguments) entry.function.arguments += call.function.arguments;
+        calls.set(call.index, entry);
+      }
     }
   }
+  await reader.cancel().catch(() => undefined);
+  return { model, usage, choices: [{ message: { content: text, tool_calls: [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call),
+    ...(reasoning !== undefined ? { reasoning_content: reasoning } : {}) } }] };
 }
 
 export class FallbackProvider implements ProviderAdapter {
@@ -289,6 +358,7 @@ export function createProviderRegistryFromEnv(env: NodeJS.ProcessEnv = process.e
       apiKey,
       baseUrl: baseUrl || env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
       model: model || env.OPENAI_MODEL || 'gpt-4o-mini',
+      stream: env.OPENAI_STREAM !== '0',
     })));
   }
   return registry;
@@ -296,6 +366,7 @@ export function createProviderRegistryFromEnv(env: NodeJS.ProcessEnv = process.e
 
 function anthropicFromEnv(env: NodeJS.ProcessEnv, apiKey: string, model?: string, baseUrl?: string): AnthropicProvider {
   const timeoutMs = Number(env.ANTHROPIC_TIMEOUT_MS);
+  const maxTokens = Number(env.ANTHROPIC_MAX_TOKENS);
   const configuredModel = model || env.ANTHROPIC_MODEL?.trim();
   const configuredBaseUrl = baseUrl || env.ANTHROPIC_BASE_URL?.trim();
   return new AnthropicProvider({
@@ -303,6 +374,7 @@ function anthropicFromEnv(env: NodeJS.ProcessEnv, apiKey: string, model?: string
     ...(configuredModel ? { model: configuredModel } : {}),
     ...(env.ANTHROPIC_EFFORT?.trim() ? { effort: env.ANTHROPIC_EFFORT.trim() } : {}),
     ...(timeoutMs > 0 ? { timeoutMs } : {}),
+    ...(Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
     ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
   });
 }
@@ -321,6 +393,7 @@ export function createProviderFromEnv(env: NodeJS.ProcessEnv = process.env): Fal
       apiKey,
       baseUrl: env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
       model: env.OPENAI_MODEL || 'gpt-4o-mini',
+      stream: env.OPENAI_STREAM !== '0',
     }),
     local,
   );

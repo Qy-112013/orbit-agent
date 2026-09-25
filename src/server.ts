@@ -7,6 +7,7 @@ import { AgentRegistry, DEFAULT_AGENTS } from './core/agent-registry.ts';
 import { MemoryService } from './core/memory.ts';
 import { Orchestrator, COLLABORATION_LIMITS } from './core/orchestrator.ts';
 import { createProviderFromEnv, createProviderRegistryFromEnv, ProviderRegistry } from './core/providers.ts';
+import { ProviderSummarizer } from './core/compaction.ts';
 import { JsonStore } from './core/store.ts';
 import { createDefaultTools } from './core/tools.ts';
 import { SkillRegistry } from './core/skills.ts';
@@ -130,7 +131,7 @@ function providerStatus(provider) {
   };
 }
 
-export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
+export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, summarizer, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
   const registry = new AgentRegistry(DEFAULT_AGENTS);
   const store = new JsonStore(dataFile, { seedAgents: registry.list() });
   await store.init();
@@ -145,7 +146,9 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   }
   const vectors = await new VectorIndex(`${dataFile}.vectors.json`, embeddingProvider === undefined ? createEmbeddingProviderFromEnv() : embeddingProvider,
     { minScore: process.env.ORBIT_EMBEDDING_MIN_SCORE?.trim() ? Number(process.env.ORBIT_EMBEDDING_MIN_SCORE) : 0.3 }).init();
-  const memory = new MemoryService(store, vectors);
+  // Model summaries only when providers come from the environment; injected providers opt in explicitly.
+  const compactor = summarizer !== undefined ? summarizer : providers || provider ? undefined : new ProviderSummarizer(providerRuntime);
+  const memory = new MemoryService(store, vectors, { summarizer: compactor ?? undefined });
   const knowledge = new KnowledgeService(store, vectors);
   const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
   const skills = await new SkillRegistry().loadDirectory(SKILLS_DIR);
@@ -292,7 +295,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           'x-accel-buffering': 'no',
         });
         const writeEvent = (event) => {
-          response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+          // Ephemeral events (streamed deltas) have no sequence and must not move Last-Event-ID.
+          response.write(`${event.sequence === undefined ? '' : `id: ${event.sequence}\n`}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
         };
         const unsubscribe = orchestrator.subscribe(threadId, writeEvent);
         // Subscribe before replaying the durable tail so an event emitted

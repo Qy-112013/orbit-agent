@@ -3,6 +3,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 export interface RetryOptions {
   maxRetries?: number;
   timeoutMs: number;
+  /** 'total' bounds each attempt including the body; 'headers' stops at the response headers so callers can stream. */
+  timeoutScope?: 'total' | 'headers';
   baseDelayMs?: number;
   maxDelayMs?: number;
   /** Caller cancellation; never retried. */
@@ -34,11 +36,14 @@ export function retryAfterMs(header: string | null, now = Date.now()): number | 
  * retryable, so callers keep their own HTTP error reporting.
  */
 export async function fetchWithRetry(url: string, init: RequestInit, {
-  maxRetries = 2, timeoutMs, baseDelayMs = 500, maxDelayMs = 8_000, signal,
+  maxRetries = 2, timeoutMs, timeoutScope = 'total', baseDelayMs = 500, maxDelayMs = 8_000, signal,
   sleep = delay, fetchImpl = fetch, random = Math.random,
 }: RetryOptions): Promise<{ response: Response; attempts: number }> {
   for (let attempt = 1; ; attempt += 1) {
-    const timeout = AbortSignal.timeout(timeoutMs);
+    const headersController = new AbortController();
+    const timeout = timeoutScope === 'total' ? AbortSignal.timeout(timeoutMs) : headersController.signal;
+    const timer = timeoutScope === 'headers'
+      ? setTimeout(() => headersController.abort(new DOMException('request timed out', 'TimeoutError')), timeoutMs) : undefined;
     let response: Response | undefined;
     let failure: unknown;
     try {
@@ -46,6 +51,8 @@ export async function fetchWithRetry(url: string, init: RequestInit, {
     } catch (error) {
       if (signal?.aborted) throw error;
       failure = error;
+    } finally {
+      clearTimeout(timer);
     }
     const retryable = response ? isRetryableStatus(response.status) : true;
     if (!retryable || attempt > maxRetries) {

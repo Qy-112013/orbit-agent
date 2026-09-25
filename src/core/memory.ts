@@ -1,6 +1,7 @@
-import type { Memory, ProviderContext } from './types.ts';
+import { nowIso, type ConversationSummary, type Memory, type ProviderContext } from './types.ts';
 import type { StoragePort } from './contracts.ts';
-import { CONTEXT_LIMITS, conversationContext } from './conversation.ts';
+import { CONTEXT_LIMITS, conversationContext, extractiveSummary, planHistory } from './conversation.ts';
+import type { Summarizer } from './compaction.ts';
 import { fuseRanks, searchMode, type RetrievalMetadata, type SearchMode, type VectorIndex } from './vector-index.ts';
 
 const STOP_WORDS = new Set([
@@ -45,10 +46,12 @@ function rank(query: string, text: string, importance: number, createdAt: string
 export class MemoryService {
   private store: Pick<StoragePort, 'addMemory' | 'listMemories' | 'getThread' | 'touchThread'>;
   private vectors?: VectorIndex;
+  private summarizer?: Summarizer;
 
-  constructor(store: Pick<StoragePort, 'addMemory' | 'listMemories' | 'getThread' | 'touchThread'>, vectors?: VectorIndex) {
+  constructor(store: Pick<StoragePort, 'addMemory' | 'listMemories' | 'getThread' | 'touchThread'>, vectors?: VectorIndex, { summarizer }: { summarizer?: Summarizer } = {}) {
     this.store = store;
     this.vectors = vectors;
+    this.summarizer = summarizer;
   }
 
   private accessibleMemories(threadId?: string): Memory[] {
@@ -112,19 +115,29 @@ export class MemoryService {
     return { hits, method, ...(semantic ? { index: semantic.index } : {}), ...(fallbackReason ? { fallbackReason } : {}) };
   }
 
-  async prepareContext(threadId: string, query: string, options: { messageLimit?: number; memoryLimit?: number; excludeMessageId?: string } = {}): Promise<ProviderContext> {
-    const previous = this.store.getThread(threadId)?.summary;
-    const context = await this.buildContext(threadId, query, options);
-    if (context.summary && context.summary.throughSequence !== previous?.throughSequence) {
-      await this.store.touchThread(threadId, { summary: context.summary });
+  /** Compacts overflowing history (model summary, extractive fallback), persists it, then builds context. */
+  async prepareContext(threadId: string, query: string, options: { memoryLimit?: number; excludeMessageId?: string } = {}): Promise<ProviderContext> {
+    const thread = this.store.getThread(threadId);
+    const pending = thread ? planHistory(thread, { excludeMessageId: options.excludeMessageId }).pending : [];
+    if (thread && pending.length) {
+      let summary: ConversationSummary;
+      try {
+        if (!this.summarizer) throw new Error('no summarizer configured');
+        summary = { text: await this.summarizer.summarize({ previous: thread.summary, messages: pending }),
+          throughSequence: pending.at(-1)!.sequence, messageCount: (thread.summary?.messageCount ?? 0) + pending.length,
+          method: 'llm-v1', updatedAt: nowIso() };
+      } catch (error) {
+        summary = extractiveSummary(thread.summary, pending, this.summarizer ? String(error?.message ?? error).slice(0, 300) : undefined);
+      }
+      await this.store.touchThread(threadId, { summary });
     }
-    return context;
+    return this.buildContext(threadId, query, options);
   }
 
-  async buildContext(threadId: string, query: string, { messageLimit = 12, memoryLimit = 6, excludeMessageId }: { messageLimit?: number; memoryLimit?: number; excludeMessageId?: string } = {}): Promise<ProviderContext> {
+  async buildContext(threadId: string, query: string, { memoryLimit = 6, excludeMessageId }: { memoryLimit?: number; excludeMessageId?: string } = {}): Promise<ProviderContext> {
     const thread = this.store.getThread(threadId);
     if (!thread) return { recentMessages: [], memories: [], citations: [] };
-    const { recentMessages, summary } = conversationContext(thread, { messageLimit, excludeMessageId });
+    const { recentMessages, summary } = conversationContext(thread, { excludeMessageId });
     let remaining = CONTEXT_LIMITS.memoryChars;
     const { hits, ...retrieval } = await this.searchWithMetadata(query, { threadId, limit: memoryLimit });
     const memories = hits.flatMap((memory) => {

@@ -31,6 +31,11 @@ export function createWorkflowDemoProvider() {
         : `演示步骤已核对原文：${hit.citation.text} [${hit.citation.id}]`);
     }
     if (input.content.startsWith('SLOW_TURN')) await delay(900);
+    if (input.content.startsWith('STREAM_TURN')) {
+      const pieces = ['演示', '流式', '回答', '：逐段', '到达。'];
+      for (const piece of pieces) { input.onDelta?.(piece); await delay(250); }
+      return answer(pieces.join(''));
+    }
     const hit = input.context.knowledge?.[0];
     return answer(hit ? `演示回答，检索原文如下：\n${hit.text}\n[${hit.citation.id}]` : `演示回答：已收到 ${input.content.slice(0, 120)}`);
   } };

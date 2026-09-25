@@ -6,16 +6,70 @@ import { createProviderFromEnv, createProviderRegistryFromEnv } from '../src/cor
 const agent = { id: 'forge', name: 'Forge', role: 'builder', aliases: [], systemPrompt: 'You build things.' };
 const context = { recentMessages: [], memories: [], citations: [] };
 
+/** Renders a message as the Messages API SSE stream the SDK consumes. */
+export function sse(message: any): string {
+  const { content = [], stop_reason = 'end_turn', stop_details = null, usage = { input_tokens: 1, output_tokens: 1 }, ...rest } = message;
+  const events: any[] = [{ type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-opus-5', content: [],
+    stop_reason: null, stop_sequence: null, ...rest, usage: { ...usage, output_tokens: 0 } } }];
+  content.forEach((block: any, index: number) => {
+    const start = block.type === 'text' ? { type: 'text', text: '' } : block.type === 'tool_use' ? { type: 'tool_use', id: block.id, name: block.name, input: {} } : { type: 'thinking', thinking: '' };
+    events.push({ type: 'content_block_start', index, content_block: start });
+    if (block.type === 'text') for (const piece of block.text.match(/.{1,4}/gs) ?? []) events.push({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: piece } });
+    if (block.type === 'tool_use') events.push({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } });
+    if (block.type === 'thinking') events.push({ type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: block.signature } });
+    events.push({ type: 'content_block_stop', index });
+  });
+  events.push({ type: 'message_delta', delta: { stop_reason, stop_sequence: null, stop_details }, usage: { output_tokens: usage.output_tokens ?? 0 } });
+  events.push({ type: 'message_stop' });
+  return events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+}
+
 function fixture(responses: any[]) {
   const requests: Array<{ url: string; headers: Headers; body: any }> = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
     requests.push({ url: String(url), headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
     const next = responses.shift();
     if (typeof next === 'number') return new Response(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'busy' } }), { status: next, headers: { 'content-type': 'application/json' } });
-    return new Response(JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-opus-5', stop_reason: 'end_turn', ...next }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(sse(next), { status: 200, headers: { 'content-type': 'text/event-stream' } });
   }) as typeof fetch;
   return { requests, provider: new AnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, maxRetries: 2 }) };
 }
+
+test('streams text deltas and returns the assembled answer', async () => {
+  const { requests, provider } = fixture([{ content: [{ type: 'text', text: 'streamed answer' }] }]);
+  const deltas: string[] = [];
+  const result = await provider.complete({ agent, content: 'x', context, onDelta: (text) => deltas.push(text) });
+  assert.equal(requests[0].body.stream, true);
+  assert.equal(requests[0].body.max_tokens, 64000);
+  assert.ok(deltas.length > 1);
+  assert.equal(deltas.join(''), 'streamed answer');
+  assert.equal(result.content, 'streamed answer');
+});
+
+test('an idle stream is aborted with a clear error', async () => {
+  // The body never produces events; closing it on abort keeps the test process from hanging.
+  const stalled = (async (_url: string, init: RequestInit) => new Response(new ReadableStream({
+    start(controller) { init.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError'))); },
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch;
+  const provider = new AnthropicProvider({ apiKey: 'test-key', fetch: stalled, maxRetries: 0, timeoutMs: 50 });
+  await assert.rejects(provider.complete({ agent, content: 'x', context }), /idle for 50ms/);
+});
+
+test('places the summary before history and a cache breakpoint on the last history message', async () => {
+  const { requests, provider } = fixture([{ content: [{ type: 'text', text: 'ok' }] }]);
+  await provider.complete({ agent, content: 'now', context: { ...context,
+    summary: { text: 'goal: ship it', throughSequence: 4, messageCount: 4, method: 'llm-v1', updatedAt: '' },
+    memories: [{ id: 'mem', text: 'fact', createdAt: '' }] as any,
+    recentMessages: [
+      { id: 'm5', threadId: 't', role: 'user', content: 'earlier question', sequence: 5, createdAt: '', metadata: {} },
+      { id: 'm6', threadId: 't', role: 'assistant', agentId: 'atlas', content: 'earlier answer', sequence: 6, createdAt: '', metadata: {} },
+    ] as any } });
+  const messages = requests[0].body.messages;
+  assert.match(messages[0].content, /^Earlier conversation summary \(model-generated, through message #4/);
+  assert.deepEqual(messages[2].content, [{ type: 'text', text: '[atlas] earlier answer', cache_control: { type: 'ephemeral' } }]);
+  assert.doesNotMatch(messages[3].content, /Earlier conversation/);
+  assert.match(messages[3].content, /^Reference context:[\s\S]*now$/);
+});
 
 test('sends cached system, adaptive thinking, fallbacks and sorted tools', async () => {
   const { requests, provider } = fixture([{ content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 2000, cache_creation_input_tokens: 50 } }]);

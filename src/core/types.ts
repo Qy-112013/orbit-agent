@@ -32,6 +32,8 @@ export const EVENT = Object.freeze({
   SKILLS_SELECTED: 'skills.selected',
   AGENT_STARTED: 'agent.started',
   AGENT_COMPLETED: 'agent.completed',
+  /** Ephemeral streamed text; broadcast only, never persisted. */
+  AGENT_DELTA: 'agent.delta',
   AGENT_FAILED: 'agent.failed',
   AGENT_STEP_STARTED: 'agent.step.started',
   AGENT_STEP_COMPLETED: 'agent.step.completed',
@@ -88,7 +90,9 @@ export interface ConversationSummary {
   text: string;
   throughSequence: number;
   messageCount: number;
-  method: 'extractive-v1';
+  method: 'extractive-v1' | 'llm-v1';
+  /** Why a model summary was not used; present only on extractive fallbacks. */
+  fallbackReason?: string;
   updatedAt: string;
 }
 
@@ -289,6 +293,8 @@ export interface ProviderInput {
   transcript?: AgentTurnMessage[];
   /** Constrains the final answer to JSON; providers without support ignore it. */
   responseSchema?: { name: string; schema: Record<string, unknown> };
+  /** Receives visible text as it streams; providers without streaming ignore it. */
+  onDelta?: (text: string) => void;
 }
 
 export interface ProviderContext {

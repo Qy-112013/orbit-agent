@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createRouter } from './router.ts';
 import { id } from './ids.ts';
-import { EVENT, ROLE, STRATEGY, asNonEmptyString } from './types.ts';
+import { EVENT, ROLE, STRATEGY, asNonEmptyString, nowIso } from './types.ts';
 import type { ProviderAdapter, StoragePort } from './contracts.ts';
 import type { SkillRegistry } from './skills.ts';
 import { AgentLoop, type LoopLimits, type RunTool } from './agent-loop.ts';
@@ -49,6 +49,26 @@ export class Orchestrator {
     const handler = (event) => listener(event);
     this.events.on(`thread:${threadId}`, handler);
     return () => this.events.off(`thread:${threadId}`, handler);
+  }
+
+  /** Coalesces streamed text (~50ms) into ephemeral events that are broadcast but never persisted. */
+  deltaStream(threadId, base) {
+    let pending = '';
+    let step = 0;
+    let timer = null;
+    const flush = () => {
+      clearTimeout(timer);
+      timer = null;
+      if (!pending) return;
+      this.events.emit(`thread:${threadId}`, { id: id('delta'), threadId, type: EVENT.AGENT_DELTA, payload: { ...base, step, text: pending }, createdAt: nowIso() });
+      pending = '';
+    };
+    const push = ({ step: next, text }) => {
+      if (next !== step) { flush(); step = next; }
+      pending += text;
+      timer ??= setTimeout(flush, 50);
+    };
+    return { push, flush };
   }
 
   async emit(threadId, type, payload = {}) {
@@ -127,8 +147,14 @@ export class Orchestrator {
           return { agentId: target.id, agentName: target.name, messageId: answer.id, status, content: compact(answer.content, 6000), citations: answer.citations };
         },
       }] : [];
-      const result = await this.agentLoop.run({ agent, content: enrichedContent, context: runContext }, { threadId, runId },
-        (type, payload) => this.emit(threadId, type, payload), runTools);
+      const deltas = this.deltaStream(threadId, { runId, agentId, phase });
+      let result;
+      try {
+        result = await this.agentLoop.run({ agent, content: enrichedContent, context: runContext }, { threadId, runId },
+          (type, payload) => this.emit(threadId, type, payload), runTools, deltas.push);
+      } finally {
+        deltas.flush();
+      }
       const latencyMs = Date.now() - startedAt;
       const message = await this.store.appendMessage({
         threadId,
@@ -248,7 +274,8 @@ export class Orchestrator {
 
     const context = await this.memory.prepareContext(threadId, route.cleanContent, { memoryLimit: 6, excludeMessageId: userMessage.id });
     if (context.summary && context.summary.throughSequence !== thread.summary?.throughSequence) {
-      await this.emit(threadId, EVENT.CONTEXT_COMPACTED, { throughSequence: context.summary.throughSequence, messageCount: context.summary.messageCount, method: context.summary.method });
+      await this.emit(threadId, EVENT.CONTEXT_COMPACTED, { throughSequence: context.summary.throughSequence, messageCount: context.summary.messageCount, method: context.summary.method,
+        ...(context.summary.fallbackReason ? { fallbackReason: context.summary.fallbackReason } : {}) });
     }
     const previousQuestion = [...context.recentMessages].reverse().find((message) => message.role === ROLE.USER)?.content ?? '';
     const retrievalQuery = route.cleanContent.length < 80 && previousQuestion

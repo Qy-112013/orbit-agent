@@ -73,7 +73,8 @@ export class AgentLoop {
     return this.toolsEnabled ? this.tools.list().filter((tool) => tool.readOnly === true) : [];
   }
 
-  async run(input: ProviderInput, execution: { threadId: string; runId: string }, emit: EventSink, runTools: RunTool[] = []): Promise<ProviderResult> {
+  async run(input: ProviderInput, execution: { threadId: string; runId: string }, emit: EventSink, runTools: RunTool[] = [],
+    onDelta?: (delta: { step: number; text: string }) => void): Promise<ProviderResult> {
     const workflow = input.context.workflow;
     // Structured workflow phases answer with one JSON object and never call tools.
     const responseSchema = workflow
@@ -94,7 +95,8 @@ export class AgentLoop {
     for (let step = 1; step <= this.limits.maxSteps; step += 1) {
       const startedAt = Date.now();
       await publish(EVENT.AGENT_STEP_STARTED, { step });
-      const result = await this.provider.complete({ ...input, tools: definitions, transcript: structuredClone(transcript), ...(responseSchema ? { responseSchema } : {}) });
+      const result = await this.provider.complete({ ...input, tools: definitions, transcript: structuredClone(transcript), ...(responseSchema ? { responseSchema } : {}),
+        ...(onDelta && !responseSchema ? { onDelta: (text: string) => onDelta({ step, text }) } : {}) });
       if (result.toolCalls !== undefined && !Array.isArray(result.toolCalls)) {
         throw loopError('INVALID_TOOL_CALL', '模型的 toolCalls 必须是数组。');
       }

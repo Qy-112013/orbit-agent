@@ -6,6 +6,7 @@
 import { AnthropicProvider } from '../src/core/anthropic-provider.ts';
 import { AgentLoop } from '../src/core/agent-loop.ts';
 import { parsePlan } from '../src/core/planner.ts';
+import { ProviderSummarizer } from '../src/core/compaction.ts';
 
 const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
 if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
@@ -35,8 +36,21 @@ async function check(name: string, run: () => Promise<string>) {
 }
 
 await check('plain chat', async () => {
-  const result = await provider.complete({ agent, content: '用一句话回答：1+1 等于几？', context });
-  return `model=${result.model} usage=${JSON.stringify(result.usage)}\n${result.content.slice(0, 200)}`;
+  const deltas: string[] = [];
+  const result = await provider.complete({ agent, content: '用两句话介绍一下流式输出的好处。', context, onDelta: (text) => deltas.push(text) });
+  if (deltas.length < 2 || deltas.join('').trim() !== result.content) throw new Error(`expected streamed deltas matching the answer, got ${deltas.length}`);
+  return `model=${result.model} deltas=${deltas.length} usage=${JSON.stringify(result.usage)}\n${result.content.slice(0, 200)}`;
+});
+
+await check('model summary', async () => {
+  const messages = [
+    { role: 'user', content: '项目 Vega 的硬约束：只能使用本地存储，预算 48000 元。' },
+    { role: 'assistant', agentId: 'atlas', content: '收到，我会按本地存储设计，并把预算上限记为 48000 元。' },
+    { role: 'user', content: '另外，发布日期定在十月底。' },
+  ].map((message, index) => ({ id: `m${index + 1}`, threadId: 't', sequence: index + 1, createdAt: '', metadata: {}, ...message })) as any;
+  const summary = await new ProviderSummarizer(provider).summarize({ messages });
+  if (!/48000|4\.8\s*万/.test(summary) || !/本地存储/.test(summary)) throw new Error(`summary lost key constraints: ${summary}`);
+  return summary.slice(0, 400);
 });
 
 await check('tool round trip', async () => {

@@ -1,10 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, referencedCitations } from './context-format.ts';
+import { EVIDENCE_INSTRUCTIONS, formatReferenceContext, formatSummary, referencedCitations } from './context-format.ts';
 import { toProviderSchema } from './structured-output.ts';
 import type { ProviderAdapter } from './contracts.ts';
 import type { AgentTurnMessage, ProviderInput, ProviderResult, ProviderUsage, ToolCall } from './types.ts';
 
-export const ANTHROPIC_DEFAULTS = Object.freeze({ model: 'claude-opus-5', effort: 'high', maxTokens: 16_000, timeoutMs: 300_000, maxRetries: 2 });
+export const ANTHROPIC_DEFAULTS = Object.freeze({ model: 'claude-opus-5', effort: 'high', maxTokens: 64_000, timeoutMs: 300_000, maxRetries: 2 });
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
 
@@ -38,13 +38,14 @@ function transcriptMessages(transcript: AgentTurnMessage[]): ApiMessage[] {
   return messages;
 }
 
-/** Native Messages API adapter: adaptive thinking, prompt caching, structured output and SDK retries. */
+/** Native Messages API adapter: streaming, adaptive thinking, prompt caching, structured output and SDK retries. */
 export class AnthropicProvider implements ProviderAdapter {
   readonly id = 'anthropic';
   private client: Anthropic;
   private model: string;
   private effort: string;
   private maxTokens: number;
+  private idleTimeoutMs: number;
 
   constructor({ apiKey, model = ANTHROPIC_DEFAULTS.model, effort = ANTHROPIC_DEFAULTS.effort, maxTokens = ANTHROPIC_DEFAULTS.maxTokens,
     timeoutMs = ANTHROPIC_DEFAULTS.timeoutMs, maxRetries = ANTHROPIC_DEFAULTS.maxRetries, baseUrl, fetch }: {
@@ -56,21 +57,30 @@ export class AnthropicProvider implements ProviderAdapter {
     this.model = model;
     this.effort = effort;
     this.maxTokens = maxTokens;
+    this.idleTimeoutMs = timeoutMs;
   }
 
-  async complete({ agent, content, context, tools = [], transcript = [], responseSchema }: ProviderInput): Promise<ProviderResult> {
+  async complete({ agent, content, context, tools = [], transcript = [], responseSchema, onDelta }: ProviderInput): Promise<ProviderResult> {
     const system = [
       agent?.systemPrompt ?? 'You are a helpful assistant.',
       ...(context.skills ?? []).map((skill) => `Skill: ${skill.name}\n${skill.content}`),
       EVIDENCE_INSTRUCTIONS,
     ].join('\n\n');
-    const reference = formatReferenceContext(context);
-    // Stable prefix first (tools, system, history); per-turn reference context goes last.
-    const messages: ApiMessage[] = [
+    const reference = formatReferenceContext(context, { includeSummary: false });
+    const summary = formatSummary(context.summary);
+    const history: ApiMessage[] = [
+      ...(summary ? [{ role: 'user' as const, content: summary }] : []),
       ...(context.recentMessages ?? []).map((message) => ({
         role: message.role === 'assistant' ? 'assistant' as const : 'user' as const,
         content: `${message.agentId ? '[' + message.agentId + '] ' : message.role === 'system' ? '[Thread note] ' : ''}${message.content}`,
       })),
+    ];
+    // Breakpoint at the end of the stable prefix (tools, system, summary, history) so the
+    // next turn can read this entry; the per-turn reference context and question follow it.
+    const last = history.at(-1);
+    if (last) history[history.length - 1] = { ...last, content: [{ type: 'text', text: String(last.content), cache_control: { type: 'ephemeral' } }] };
+    const messages: ApiMessage[] = [
+      ...history,
       { role: 'user', content: reference ? `Reference context:\n${reference}\n\n${content}` : content },
       ...transcriptMessages(transcript),
     ];
@@ -88,7 +98,7 @@ export class AnthropicProvider implements ProviderAdapter {
       ...(tools.length ? { tools: [...tools].sort((a, b) => a.name.localeCompare(b.name))
         .map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })) } : {}),
     };
-    const response: any = await this.client.beta.messages.create(request as any);
+    const response: any = await this.stream(request, onDelta);
     if (response.stop_reason === 'refusal') {
       throw new Error(`anthropic refused the request${response.stop_details?.category ? ' (' + response.stop_details.category + ')' : ''}`);
     }
@@ -105,5 +115,29 @@ export class AnthropicProvider implements ProviderAdapter {
       model: response.model ?? this.model,
       usage: anthropicUsage(response.usage),
     };
+  }
+
+  /** Streams to avoid HTTP timeouts on long turns; aborts when no event arrives within the idle timeout. */
+  private async stream(request: Record<string, unknown>, onDelta?: (text: string) => void): Promise<any> {
+    const idle = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const touch = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => idle.abort(new Error(`anthropic stream idle for ${this.idleTimeoutMs}ms`)), this.idleTimeoutMs);
+    };
+    // Reject on idle even if the transport ignores the abort signal.
+    const stalled = new Promise<never>((_, reject) => idle.signal.addEventListener('abort', () => reject(idle.signal.reason), { once: true }));
+    stalled.catch(() => undefined);
+    touch();
+    try {
+      const stream = this.client.beta.messages.stream(request as any, { signal: idle.signal });
+      stream.on('streamEvent', touch);
+      if (onDelta) stream.on('text', (delta) => onDelta(delta));
+      const final = stream.finalMessage();
+      final.catch(() => undefined);
+      return await Promise.race([final, stalled]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }

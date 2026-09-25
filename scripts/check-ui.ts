@@ -128,6 +128,16 @@ try {
   await when(`${state}.currentThread.messages.length === 2 && !${state}.busy`, 'cited chat answer');
   assert.equal(await evaluate('document.querySelectorAll("#timeline .citation-detail").length'), 1);
 
+  console.log('UI: streaming a live preview that the persisted message replaces');
+  await set('#message-input', 'STREAM_TURN 流式预览');
+  await evaluate('document.querySelector("#composer").requestSubmit()');
+  const partial = await until(() => evaluate('document.querySelector("#timeline .message.streaming .message-content")?.textContent'), 'streaming preview');
+  assert.ok(partial.length > 0 && partial.length < '演示流式回答：逐段到达。'.length, `expected a partial preview, got ${partial}`);
+  await when(`${state}.currentThread.messages.length === 4 && !${state}.busy`, 'streamed answer persisted');
+  await when('!document.querySelector("#timeline .message.streaming")', 'preview replaced');
+  assert.equal(await evaluate('[...document.querySelectorAll("#timeline .message.assistant .message-content")].at(-1).textContent'), '演示流式回答：逐段到达。');
+  assert.equal(await evaluate(`${state}.events.some((event) => event.type === "agent.delta")`), false);
+
   console.log('UI: switching threads during an active request and preserving drafts');
   await set('#message-input', 'SLOW_TURN 会话 A 的慢请求');
   await evaluate('document.querySelector("#composer").requestSubmit()');
@@ -204,7 +214,7 @@ try {
   await capture('embedding.png');
   assert.equal(await evaluate('Boolean(window.__orbitUnsafe)'), false);
   assert.deepEqual(cdp.errors, [], 'browser console must have no uncaught exceptions');
-  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, provider: 'scripted-demo', embedding: 'deterministic-fixture', realModelCalls: 0, checks: ['document import', 'source escaping', 'retrieval citations', 'late-response isolation', 'per-thread drafts', 'plan/review/replan', 'desktop layout', 'rename', 'branch', 'archive/restore', 'thread search', 'semantic retrieval', 'index backfill', 'embedding fallback/recovery'], screenshots: ['desktop.png', 'embedding.png'], consoleErrors: cdp.errors }, null, 2));
+  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, provider: 'scripted-demo', embedding: 'deterministic-fixture', realModelCalls: 0, checks: ['document import', 'streaming preview', 'source escaping', 'retrieval citations', 'late-response isolation', 'per-thread drafts', 'plan/review/replan', 'desktop layout', 'rename', 'branch', 'archive/restore', 'thread search', 'semantic retrieval', 'index backfill', 'embedding fallback/recovery'], screenshots: ['desktop.png', 'embedding.png'], consoleErrors: cdp.errors }, null, 2));
   console.log(`UI smoke passed. Artifacts: ${output}`);
 } catch (error) {
   if (browserError && !cdp) console.error(browserError);
