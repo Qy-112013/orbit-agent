@@ -32,10 +32,14 @@ export const EVENT = Object.freeze({
   SKILLS_SELECTED: 'skills.selected',
   AGENT_STARTED: 'agent.started',
   AGENT_COMPLETED: 'agent.completed',
+  /** Ephemeral streamed text; broadcast only, never persisted. */
+  AGENT_DELTA: 'agent.delta',
   AGENT_FAILED: 'agent.failed',
   AGENT_STEP_STARTED: 'agent.step.started',
   AGENT_STEP_COMPLETED: 'agent.step.completed',
   TOOL_STARTED: 'tool.started',
+  APPROVAL_REQUESTED: 'approval.requested',
+  APPROVAL_RESOLVED: 'approval.resolved',
   TOOL_COMPLETED: 'tool.completed',
   TOOL_FAILED: 'tool.failed',
   PROVIDER_FALLBACK: 'provider.fallback',
@@ -88,7 +92,9 @@ export interface ConversationSummary {
   text: string;
   throughSequence: number;
   messageCount: number;
-  method: 'extractive-v1';
+  method: 'extractive-v1' | 'llm-v1';
+  /** Why a model summary was not used; present only on extractive fallbacks. */
+  fallbackReason?: string;
   updatedAt: string;
 }
 
@@ -243,12 +249,21 @@ export interface ProviderResult {
   content: string;
   /** Provider protocol state; retained within a run, never published to the UI. */
   reasoningContent?: string;
+  providerState?: unknown;
   toolCalls?: ToolCall[];
   citations?: unknown[];
   provider?: string;
   model?: string;
+  /** API providers report ProviderUsage; CLI providers pass through their native shape. */
   usage?: unknown;
   metadata?: Record<string, unknown>;
+}
+
+export interface ProviderUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 export interface ToolDefinition {
@@ -256,6 +271,8 @@ export interface ToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
   readOnly?: boolean;
+  /** Non-read-only tools declare this to be offered to models under the approval policy. */
+  approval?: 'always' | 'never';
   capability?: string;
 }
 
@@ -267,7 +284,9 @@ export interface ToolCall {
 
 /** Model/tool exchanges belong to a single run, separate from thread history. */
 export type AgentTurnMessage =
-  | { role: 'assistant'; content: string; toolCalls: ToolCall[]; reasoningContent?: string }
+  | { role: 'assistant'; content: string; toolCalls: ToolCall[]; reasoningContent?: string;
+      /** Raw provider content blocks (e.g. Anthropic thinking); replayed only to the provider that produced them. */
+      providerState?: unknown }
   | { role: 'tool'; toolCallId: string; content: string };
 
 export interface ProviderInput {
@@ -276,6 +295,10 @@ export interface ProviderInput {
   context: ProviderContext;
   tools?: ToolDefinition[];
   transcript?: AgentTurnMessage[];
+  /** Constrains the final answer to JSON; providers without support ignore it. */
+  responseSchema?: { name: string; schema: Record<string, unknown> };
+  /** Receives visible text as it streams; providers without streaming ignore it. */
+  onDelta?: (text: string) => void;
 }
 
 export interface ProviderContext {

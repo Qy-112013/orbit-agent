@@ -7,8 +7,11 @@ import { AgentRegistry, DEFAULT_AGENTS } from './core/agent-registry.ts';
 import { MemoryService } from './core/memory.ts';
 import { Orchestrator, COLLABORATION_LIMITS } from './core/orchestrator.ts';
 import { createProviderFromEnv, createProviderRegistryFromEnv, ProviderRegistry } from './core/providers.ts';
+import { ProviderSummarizer } from './core/compaction.ts';
 import { JsonStore } from './core/store.ts';
 import { createDefaultTools } from './core/tools.ts';
+import { registerWorkspaceWriteTools } from './core/workspace-tools.ts';
+import { McpManager } from './core/mcp-client.ts';
 import { SkillRegistry } from './core/skills.ts';
 import { KnowledgeService, KNOWLEDGE_LIMITS } from './core/knowledge.ts';
 import { CONTEXT_LIMITS } from './core/conversation.ts';
@@ -36,13 +39,32 @@ const MIME_TYPES = {
 };
 
 function headers(contentType = 'application/json; charset=utf-8') {
+  // No CORS: the UI is same-origin, and cross-origin pages must not drive tools or approvals.
   return {
     'content-type': contentType,
     'cache-control': 'no-store',
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type',
   };
+}
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+function hostName(value: string): string {
+  return value.startsWith('[') ? value.slice(0, value.indexOf(']') + 1) : value.split(':')[0];
+}
+
+/** Blocks DNS rebinding (foreign Host) and cross-site writes (foreign Origin) before any API work. */
+export function checkRequestOrigin(request, allowedHosts: Set<string>): { code: string; message: string } | null {
+  const host = String(request.headers.host ?? '').toLowerCase();
+  if (!LOCAL_HOSTS.has(hostName(host)) && !allowedHosts.has(hostName(host))) {
+    return { code: 'HOST_NOT_ALLOWED', message: `host is not allowed: ${host || '(missing)'}` };
+  }
+  const origin = request.headers.origin;
+  if (origin && !['GET', 'HEAD'].includes(request.method ?? 'GET')) {
+    let originHost = '';
+    try { originHost = new URL(origin).host.toLowerCase(); } catch { /* malformed origins are rejected below */ }
+    if (originHost !== host) return { code: 'ORIGIN_NOT_ALLOWED', message: 'cross-origin requests are not allowed' };
+  }
+  return null;
 }
 
 function sendJson(response, status, payload) {
@@ -51,7 +73,8 @@ function sendJson(response, status, payload) {
 }
 
 function sendError(response, error) {
-  const code = error?.code === 'NOT_FOUND' ? 404 : error?.code === 'VALIDATION_ERROR' ? 400 : error?.code === 'CONFLICT' ? 409 : 500;
+  const code = error?.code === 'NOT_FOUND' ? 404 : error?.code === 'VALIDATION_ERROR' ? 400 : error?.code === 'CONFLICT' ? 409
+    : error?.code === 'HOST_NOT_ALLOWED' || error?.code === 'ORIGIN_NOT_ALLOWED' ? 403 : 500;
   sendJson(response, code, { error: { code: error?.code ?? 'INTERNAL_ERROR', message: String(error?.message ?? error) } });
 }
 
@@ -130,7 +153,7 @@ function providerStatus(provider) {
   };
 }
 
-export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
+export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, summarizer, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, mcpConfigPath = process.env.ORBIT_MCP_CONFIG || join(PROJECT_DIR, 'mcp.json'), loopOptions = {} } = {}) {
   const registry = new AgentRegistry(DEFAULT_AGENTS);
   const store = new JsonStore(dataFile, { seedAgents: registry.list() });
   await store.init();
@@ -145,21 +168,30 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   }
   const vectors = await new VectorIndex(`${dataFile}.vectors.json`, embeddingProvider === undefined ? createEmbeddingProviderFromEnv() : embeddingProvider,
     { minScore: process.env.ORBIT_EMBEDDING_MIN_SCORE?.trim() ? Number(process.env.ORBIT_EMBEDDING_MIN_SCORE) : 0.3 }).init();
-  const memory = new MemoryService(store, vectors);
+  // Model summaries only when providers come from the environment; injected providers opt in explicitly.
+  const compactor = summarizer !== undefined ? summarizer : providers || provider ? undefined : new ProviderSummarizer(providerRuntime);
+  const memory = new MemoryService(store, vectors, { summarizer: compactor ?? undefined });
   const knowledge = new KnowledgeService(store, vectors);
   const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
+  // Only the web app registers side-effecting tools; the MCP server keeps the read-only set.
+  registerWorkspaceWriteTools(tools, { workspaceRoot, backupDir: join(dirname(dataFile), 'backups'), protectedDirs: [dirname(dataFile)] });
+  // External MCP servers connect in the background; their tools appear in the registry once ready.
+  const mcp = new McpManager({ registry: tools, configPath: mcpConfigPath, cwd: workspaceRoot });
+  void mcp.start();
   const skills = await new SkillRegistry().loadDirectory(SKILLS_DIR);
   const orchestrator = new Orchestrator({ store, registry, memory, knowledge, provider: providerRuntime, tools, skills,
-    loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', ...loopOptions },
+    loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', toolPolicy: process.env.ORBIT_TOOL_POLICY === 'read-only' ? 'read-only' : 'approval',
+      ...(Number(process.env.ORBIT_APPROVAL_TIMEOUT_MS) > 0 ? { approvalTimeoutMs: Number(process.env.ORBIT_APPROVAL_TIMEOUT_MS) } : {}), ...loopOptions },
   });
 
-  const runtime = { store, registry, memory, knowledge, vectors, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
+  const runtime = { store, registry, memory, knowledge, vectors, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator, mcp };
   const requireThread = (threadId) => {
     const thread = store.getThread(threadId);
     if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
     return thread;
   };
 
+  const allowedHosts = new Set((process.env.ORBIT_ALLOWED_HOSTS ?? '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean));
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
@@ -179,6 +211,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         return;
       }
 
+      const denied = checkRequestOrigin(request, allowedHosts);
+      if (denied) throw Object.assign(new Error(denied.message), { code: denied.code });
       const parts = pathSegments(pathname);
       const method = request.method ?? 'GET';
 
@@ -202,6 +236,18 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           knowledge: { method: vectors.enabled ? 'hybrid' : 'bm25', limits: KNOWLEDGE_LIMITS },
           retrieval: vectors.describe(),
         });
+        return;
+      }
+      if (method === 'GET' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 4 && parts[3] === 'approvals') {
+        requireThread(parts[2]);
+        sendJson(response, 200, { approvals: orchestrator.approvals.list(parts[2]) });
+        return;
+      }
+      if (method === 'POST' && parts[0] === 'api' && parts[1] === 'approvals' && parts.length === 3) {
+        const body = await readJson(request);
+        if (body.decision !== 'approve' && body.decision !== 'deny') throw Object.assign(new Error('decision must be approve or deny'), { code: 'VALIDATION_ERROR' });
+        const approval = await orchestrator.approvals.decide(parts[2], { approved: body.decision === 'approve', reason: typeof body.reason === 'string' ? body.reason : undefined });
+        sendJson(response, 200, { approvalId: approval.id, decision: body.decision });
         return;
       }
       if (method === 'GET' && pathname === '/api/agents') {
@@ -292,7 +338,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           'x-accel-buffering': 'no',
         });
         const writeEvent = (event) => {
-          response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+          // Ephemeral events (streamed deltas) have no sequence and must not move Last-Event-ID.
+          response.write(`${event.sequence === undefined ? '' : `id: ${event.sequence}\n`}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
         };
         const unsubscribe = orchestrator.subscribe(threadId, writeEvent);
         // Subscribe before replaying the durable tail so an event emitted
@@ -397,6 +444,10 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         sendJson(response, 200, { tools: tools.list() });
         return;
       }
+      if (method === 'GET' && pathname === '/api/mcp') {
+        sendJson(response, 200, mcp.status());
+        return;
+      }
       if (method === 'GET' && pathname === '/api/providers') {
         sendJson(response, 200, { providers: providerRuntime instanceof ProviderRegistry ? providerRuntime.list() : [{ id: providerRuntime.id ?? 'default', adapter: providerRuntime.constructor.name, default: true }] });
         return;
@@ -422,6 +473,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
     }
   });
 
+  // Pending side effects are denied, never left waiting, when the server stops.
+  server.on('close', () => { void orchestrator.approvals.close(); void mcp.close(); });
   return { server, runtime };
 }
 

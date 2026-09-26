@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { asNonEmptyString } from './types.ts';
+import { fetchWithRetry } from './retry.ts';
 
 export const EMBEDDING_LIMITS = Object.freeze({ batchSize: 32, timeoutMs: 15_000, dimensions: 16_384, inputChars: 2_000, overlapChars: 160, indexItems: 256, queryCache: 64 });
 
@@ -90,15 +91,13 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingAdapter {
         }
         const batch = inputs.slice(offset, end);
         offset = end;
-        const timeout = AbortSignal.timeout(this.timeoutMs);
-        const response = await fetch(this.endpoint, {
+        const { response } = await fetchWithRetry(this.endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}) },
           body: JSON.stringify({ model: this.model, input: batch, encoding_format: 'float',
             ...(this.requestedDimensions === undefined ? {} : { dimensions: this.requestedDimensions }) }),
-          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
           redirect: 'error',
-        });
+        }, { timeoutMs: this.timeoutMs, signal });
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined);
           // Remote error bodies can echo request text or credentials. Only expose the status.

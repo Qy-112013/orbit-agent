@@ -20,8 +20,8 @@ test('long conversations retain attributed early context across restarts without
   assert.match(received.context.summary.text, /仅使用本地存储/);
   assert.match(received.context.summary.text, /#1 user/);
   assert.ok(received.context.summary.text.length <= CONTEXT_LIMITS.summaryChars);
-  assert.ok(received.context.recentMessages.length <= CONTEXT_LIMITS.recentMessages);
-  assert.ok(received.context.recentMessages.reduce((sum, message) => sum + message.content.length, 0) <= CONTEXT_LIMITS.recentChars);
+  assert.ok(received.context.recentMessages.length <= CONTEXT_LIMITS.keepMessages);
+  assert.ok(received.context.recentMessages.reduce((sum, message) => sum + message.content.length, 0) <= CONTEXT_LIMITS.keepChars);
   assert.ok(!received.context.recentMessages.some((message) => message.id === turn.userMessage.id));
   assert.ok(fixture.store.listEvents({ threadId: fixture.threadId }).some((event) => event.type === 'context.compacted'));
   const restored = await new JsonStore(fixture.dataFile).init();

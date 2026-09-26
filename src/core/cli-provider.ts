@@ -80,7 +80,7 @@ async function pathExists(path: string): Promise<boolean> {
  * .cmd files on Windows; those shims are converted to a direct executable
  * invocation so user-provided prompts never become shell source code.
  */
-async function resolveCommand(command: string, env: NodeJS.ProcessEnv): Promise<{ command: string; prefixArgs: string[] }> {
+export async function resolveCommand(command: string, env: NodeJS.ProcessEnv): Promise<{ command: string; prefixArgs: string[] }> {
   const raw = command.trim();
   if (!raw) throw new CliProviderError('CLI command is empty', { code: 'CLI_NOT_CONFIGURED', provider: 'cli' });
   if (process.platform !== 'win32') return { command: raw, prefixArgs: [] };

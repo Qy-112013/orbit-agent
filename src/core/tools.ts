@@ -1,7 +1,8 @@
 import { asNonEmptyString } from './types.ts';
-import { open, readdir, realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { open, readdir } from 'node:fs/promises';
+import { relative, resolve } from 'node:path';
 import { KnowledgeService } from './knowledge.ts';
+import { resolveWorkspacePath } from './workspace-policy.ts';
 
 function knowledgeToolResult(hit) {
   // The original text lives once, inside its citation, so a few long chunks
@@ -10,20 +11,7 @@ function knowledgeToolResult(hit) {
 }
 
 async function safeWorkspacePath(workspaceRoot: string, requested = '.') {
-  const root = await realpath(resolve(workspaceRoot));
-  const candidate = resolve(root, requested);
-  const rel = relative(root, candidate);
-  if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
-    const error = new Error('workspace path escapes the configured root');
-    error.code = 'WORKSPACE_PATH_DENIED';
-    throw error;
-  }
-  const resolved = await realpath(candidate);
-  const resolvedRel = relative(root, resolved);
-  if (isAbsolute(resolvedRel) || resolvedRel === '..' || resolvedRel.startsWith(`..${sep}`)) {
-    throw Object.assign(new Error('workspace link escapes the configured root'), { code: 'WORKSPACE_PATH_DENIED' });
-  }
-  return resolved;
+  return resolveWorkspacePath(workspaceRoot, requested);
 }
 
 /** Validate the JSON Schema subset used by Orbit's built-in tools. */
@@ -71,7 +59,20 @@ export class ToolRegistry {
   }
 
   list() {
-    return [...this.tools.values()].map(({ execute, ...metadata }) => metadata);
+    return [...this.tools.values()].map(({ execute, describe, validationSchema, ...metadata }) => metadata);
+  }
+
+  unregister(name) {
+    return this.tools.delete(name);
+  }
+
+  /** Validated summary and preview of a pending call, shown to the human approving it. */
+  async describeCall(name, input, context) {
+    const tool = this.tools.get(name);
+    if (!tool) throw Object.assign(new Error(`unknown tool: ${name}`), { code: 'TOOL_NOT_FOUND' });
+    validateToolInput(tool.validationSchema ?? tool.inputSchema ?? { type: 'object' }, input ?? {});
+    if (typeof tool.describe === 'function') return tool.describe(input ?? {}, context);
+    return { summary: `${name}`, preview: JSON.stringify(input ?? {}, null, 2) };
   }
 
   async execute(name, input, context) {
@@ -81,7 +82,8 @@ export class ToolRegistry {
       error.code = 'TOOL_NOT_FOUND';
       throw error;
     }
-    validateToolInput(tool.inputSchema ?? { type: 'object' }, input ?? {});
+    // External tools (MCP) supply a loose validationSchema: their schemas may use keywords this validator does not model.
+    validateToolInput(tool.validationSchema ?? tool.inputSchema ?? { type: 'object' }, input ?? {});
     return tool.execute(input ?? {}, context);
   }
 }

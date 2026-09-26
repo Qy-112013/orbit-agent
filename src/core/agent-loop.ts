@@ -3,6 +3,8 @@ import type { ProviderAdapter } from './contracts.ts';
 import { validateToolInput, type ToolRegistry } from './tools.ts';
 import type { ToolDefinition } from './types.ts';
 import { referencedCitations, toolCitations } from './context-format.ts';
+import type { ApprovalBroker } from './approvals.ts';
+import { planSchema, REVIEW_SCHEMA } from './planner.ts';
 
 export interface LoopLimits { maxSteps: number; maxToolCalls: number; maxResultChars: number }
 export const DEFAULT_LOOP_LIMITS: Readonly<LoopLimits> = Object.freeze({ maxSteps: 5, maxToolCalls: 8, maxResultChars: 8_000 });
@@ -39,18 +41,25 @@ function boundedResult(serialized: string, limit: number) {
  * Design references and the pinned Pi revision are in docs/ORIGIN-NOTES.md.
  * Only explicitly read-only tools are available to autonomous model calls.
  */
+export type ToolPolicy = 'read-only' | 'approval';
+
 export class AgentLoop {
   readonly limits: LoopLimits;
   private provider: ProviderAdapter;
   private tools: ToolRegistry;
   private toolsEnabled: boolean;
+  private toolPolicy: ToolPolicy;
+  private approvals?: ApprovalBroker;
 
-  constructor({ provider, tools, limits = {}, toolsEnabled = true }: {
-    provider: ProviderAdapter; tools: ToolRegistry; limits?: Partial<LoopLimits>; toolsEnabled?: boolean;
+  constructor({ provider, tools, limits = {}, toolsEnabled = true, toolPolicy, approvals }: {
+    provider: ProviderAdapter; tools: ToolRegistry; limits?: Partial<LoopLimits>; toolsEnabled?: boolean; toolPolicy?: ToolPolicy; approvals?: ApprovalBroker;
   }) {
     this.provider = provider;
     this.tools = tools;
     this.toolsEnabled = toolsEnabled;
+    this.approvals = approvals;
+    // Side-effecting tools are only offered when someone can approve them.
+    this.toolPolicy = toolPolicy === 'approval' && approvals ? 'approval' : 'read-only';
     this.limits = { ...DEFAULT_LOOP_LIMITS, ...limits };
     for (const [key, maximum] of Object.entries({ maxSteps: 20, maxToolCalls: 32, maxResultChars: 32_000 })) {
       const value = this.limits[key as keyof LoopLimits];
@@ -64,17 +73,25 @@ export class AgentLoop {
   describe() {
     return {
       ...this.limits, toolsEnabled: this.toolsEnabled,
-      allowedTools: this.definitions().map((tool) => tool.name), toolPolicy: 'read-only',
+      allowedTools: this.definitions().map((tool) => tool.name), toolPolicy: this.toolPolicy,
+      approvalTools: this.definitions().filter((tool) => tool.approval === 'always').map((tool) => tool.name),
     };
   }
 
   private definitions() {
-    return this.toolsEnabled ? this.tools.list().filter((tool) => tool.readOnly === true) : [];
+    if (!this.toolsEnabled) return [];
+    return this.tools.list().filter((tool) => tool.readOnly === true || (this.toolPolicy === 'approval' && tool.approval !== undefined));
   }
 
-  async run(input: ProviderInput, execution: { threadId: string; runId: string }, emit: EventSink, runTools: RunTool[] = []): Promise<ProviderResult> {
-    const extensions = this.toolsEnabled ? runTools : [];
-    const definitions = [...this.definitions(), ...extensions.map(({ execute, ...definition }) => definition)];
+  async run(input: ProviderInput, execution: { threadId: string; runId: string }, emit: EventSink, runTools: RunTool[] = [],
+    onDelta?: (delta: { step: number; text: string }) => void): Promise<ProviderResult> {
+    const workflow = input.context.workflow;
+    // Structured workflow phases answer with one JSON object and never call tools.
+    const responseSchema = workflow
+      ? workflow.kind === 'planning' ? { name: 'plan', schema: planSchema(workflow.participants) } : { name: 'review', schema: { ...REVIEW_SCHEMA } }
+      : undefined;
+    const extensions = this.toolsEnabled && !responseSchema ? runTools : [];
+    const definitions = responseSchema ? [] : [...this.definitions(), ...extensions.map(({ execute, ...definition }) => definition)];
     const allowed = new Set(definitions.map((tool) => tool.name));
     // Each run owns its transcript, including concurrent agents.
     const transcript: AgentTurnMessage[] = [];
@@ -88,7 +105,8 @@ export class AgentLoop {
     for (let step = 1; step <= this.limits.maxSteps; step += 1) {
       const startedAt = Date.now();
       await publish(EVENT.AGENT_STEP_STARTED, { step });
-      const result = await this.provider.complete({ ...input, tools: definitions, transcript: structuredClone(transcript) });
+      const result = await this.provider.complete({ ...input, tools: definitions, transcript: structuredClone(transcript), ...(responseSchema ? { responseSchema } : {}),
+        ...(onDelta && !responseSchema ? { onDelta: (text: string) => onDelta({ step, text }) } : {}) });
       if (result.toolCalls !== undefined && !Array.isArray(result.toolCalls)) {
         throw loopError('INVALID_TOOL_CALL', '模型的 toolCalls 必须是数组。');
       }
@@ -126,6 +144,7 @@ export class AgentLoop {
       transcript.push({
         role: 'assistant', content: typeof result.content === 'string' ? result.content : '', toolCalls: structuredClone(calls),
         ...(typeof result.reasoningContent === 'string' ? { reasoningContent: result.reasoningContent } : {}),
+        ...(result.providerState !== undefined ? { providerState: result.providerState } : {}),
       });
       for (const call of calls) {
         seen.add(call.id);
@@ -136,7 +155,7 @@ export class AgentLoop {
         let serialized: string;
         let failure: { code: string; message: string } | undefined;
         try {
-          if (!allowed.has(call.name)) throw loopError('TOOL_NOT_ALLOWED', `工具 ${call.name} 不在本轮只读工具列表中。`);
+          if (!allowed.has(call.name)) throw loopError('TOOL_NOT_ALLOWED', `工具 ${call.name} 不在本轮可用工具列表中。`);
           let argumentsValue: unknown;
           try { argumentsValue = JSON.parse(call.arguments); }
           catch { throw loopError('INVALID_TOOL_ARGUMENTS', '工具参数必须是有效的 JSON 对象。'); }
@@ -145,6 +164,15 @@ export class AgentLoop {
           }
           const extension = extensions.find((tool) => tool.name === call.name);
           if (extension) validateToolInput(extension.inputSchema, argumentsValue);
+          const definition = definitions.find((tool) => tool.name === call.name);
+          if (!extension && definition?.approval === 'always') {
+            // Validate and preview before asking, so the human sees exactly what will run.
+            const request = await this.tools.describeCall(call.name, argumentsValue, { ...execution, agentId: input.agent.id });
+            const decision = await this.approvals!.request({ ...execution, agentId: input.agent.id, tool: call.name, ...request });
+            if (!decision.approved) {
+              throw loopError('APPROVAL_DENIED', `用户未批准 ${call.name}${decision.reason ? '：' + decision.reason : '。'}`);
+            }
+          }
           const value = extension
             ? await extension.execute(argumentsValue as Record<string, unknown>)
             : await this.tools.execute(call.name, argumentsValue, { ...execution, agentId: input.agent.id, maxResultChars: this.limits.maxResultChars });

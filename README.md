@@ -246,6 +246,9 @@ SSE 只是事件投影。客户端断线重连时，可以用 `after=` 或 `Last
 | POST | `/api/retrieval/reindex` | 分批补建文档与长期记忆缺失的向量 |
 | GET/POST/PATCH | `/api/tasks` | 查询、创建或更新任务 |
 | GET | `/api/tools` | 查看 allow-list 工具 |
+| GET | `/api/threads/:id/approvals` | 列出该线程待审批的工具调用 |
+| POST | `/api/approvals/:id` | 审批决策，body `{ decision: 'approve' \| 'deny', reason? }` |
+| GET | `/api/mcp` | 外部 MCP server 的连接状态、工具与最近错误 |
 | GET | `/api/providers` | 查看 Provider 映射 |
 | GET | `/api/skills` | 查看可用 Skill；`/api/skills/:id` 读取内容 |
 
@@ -263,18 +266,43 @@ MCP server 与 Web runtime 共享工具定义，支持：
 npm run mcp
 ```
 
-它通过 stdin/stdout 使用 JSON-RPC；可用工具包含记忆、知识检索、任务和受限的 workspace 读取，不提供任意 shell 执行。stdio 使用独立的 `data/mcp-state.json`，共享工具实现，不自动同步 Web 状态文件。
+它通过 stdin/stdout 使用 JSON-RPC；可用工具包含记忆、知识检索、任务和受限的 workspace 读取，不提供写入与 shell 执行。stdio 使用独立的 `data/mcp-state.json`，共享工具实现，不自动同步 Web 状态文件。
+
+### 写入工具与人工审批
+
+Web runtime 额外提供 `workspace_write`、`workspace_edit` 与 `shell_exec`，每次调用都要在 UI 的审批卡片中批准后才执行（`ORBIT_APPROVAL_TIMEOUT_MS`，默认 10 分钟，超时按拒绝处理）。路径限定在 workspace 内，拒绝 `.env*`、`.git/` 与数据目录；覆盖前备份到 `data/backups/`；不提供删除工具，删除类 shell 命令直接拒绝。`ORBIT_TOOL_POLICY=read-only` 可关闭全部写入类工具。
+
+### 连接外部 MCP server（client）
+
+在项目根目录放置 `mcp.json`（或用 `ORBIT_MCP_CONFIG` 指定路径），格式兼容 Claude Desktop：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "env": { "EXAMPLE_API_KEY": "..." },
+      "autoApprove": ["read_file"]
+    }
+  }
+}
+```
+
+- 仅支持 stdio 传输；服务启动后在后台连接，就绪后工具以 `mcp__<server>__<tool>` 出现在工具列表中。
+- 默认每次调用都需要审批；`autoApprove` 中列出的工具免审批，`"disabled": true` 可临时停用。
+- 子进程不继承环境中的密钥类变量（名称含 `KEY` / `TOKEN` / `SECRET` / `PASSWORD` 等），凭据需在 `env` 中显式配置。
 
 ## 设计边界
 
 Orbit 将当前版本控制在一条可验证的协作闭环内：
 
-- 内置工具不执行任意 shell 命令，不允许工具路径逃逸配置的 workspace；
+- 有副作用的工具（写入、shell、外部 MCP）逐次人工审批，不提供删除工具，不允许工具路径逃逸配置的 workspace；
 - 不接收浏览器传入的模型密钥，Provider 是唯一的外部模型边界；
 - 不把无限历史塞给模型，消息、事件和上下文都有明确上限；
 - 会话与原文由 `JsonStore` 串行持久化；可重建的向量缓存由独立索引写入，均使用临时文件替换；
 - CLI 适配器是显式 opt-in 的外部进程边界，交互式 PTY 和自动权限升级暂不支持；
-- 当前不包含多用户认证、组织权限、远程 MCP transport、Redis/向量数据库和自动调度。
+- 当前不包含多用户认证、组织权限、HTTP/SSE MCP transport、OS 级沙箱、Redis/向量数据库和自动调度。
 
 后续可以将 `JsonStore` 替换为 SQLite/Redis，将本地向量索引替换为专用向量存储，或增加独立的 rerank 模型。
 
