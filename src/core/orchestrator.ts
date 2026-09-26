@@ -4,7 +4,8 @@ import { id } from './ids.ts';
 import { EVENT, ROLE, STRATEGY, asNonEmptyString, nowIso } from './types.ts';
 import type { ProviderAdapter, StoragePort } from './contracts.ts';
 import type { SkillRegistry } from './skills.ts';
-import { AgentLoop, type LoopLimits, type RunTool } from './agent-loop.ts';
+import { AgentLoop, type LoopLimits, type RunTool, type ToolPolicy } from './agent-loop.ts';
+import { ApprovalBroker } from './approvals.ts';
 import { KnowledgeService } from './knowledge.ts';
 import { CONTEXT_LIMITS } from './conversation.ts';
 import { PlanExecutor } from './planner.ts';
@@ -28,7 +29,7 @@ function compact(text, limit = 180) {
  * invoke, persist and publish an auditable event trail.
  */
 export class Orchestrator {
-  constructor({ store, registry, memory, knowledge, provider, tools, skills, loopOptions = {} }: { store: StoragePort; registry: any; memory: any; knowledge?: KnowledgeService; provider: ProviderAdapter; tools: any; skills?: SkillRegistry; loopOptions?: { limits?: Partial<LoopLimits>; toolsEnabled?: boolean } }) {
+  constructor({ store, registry, memory, knowledge, provider, tools, skills, loopOptions = {} }: { store: StoragePort; registry: any; memory: any; knowledge?: KnowledgeService; provider: ProviderAdapter; tools: any; skills?: SkillRegistry; loopOptions?: { limits?: Partial<LoopLimits>; toolsEnabled?: boolean; toolPolicy?: ToolPolicy; approvalTimeoutMs?: number } }) {
     this.store = store;
     this.registry = registry;
     this.memory = memory;
@@ -36,7 +37,9 @@ export class Orchestrator {
     this.provider = provider;
     this.tools = tools;
     this.skills = skills;
-    this.agentLoop = new AgentLoop({ provider, tools, ...loopOptions });
+    const { approvalTimeoutMs, ...agentLoopOptions } = loopOptions;
+    this.approvals = new ApprovalBroker({ emit: (threadId, type, payload) => this.emit(threadId, type, payload), ...(approvalTimeoutMs ? { timeoutMs: approvalTimeoutMs } : {}) });
+    this.agentLoop = new AgentLoop({ provider, tools, approvals: this.approvals, ...agentLoopOptions });
     this.router = createRouter(registry);
     this.events = new EventEmitter();
     this.events.setMaxListeners(100);

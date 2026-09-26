@@ -38,6 +38,8 @@ export const EVENT = Object.freeze({
   AGENT_STEP_STARTED: 'agent.step.started',
   AGENT_STEP_COMPLETED: 'agent.step.completed',
   TOOL_STARTED: 'tool.started',
+  APPROVAL_REQUESTED: 'approval.requested',
+  APPROVAL_RESOLVED: 'approval.resolved',
   TOOL_COMPLETED: 'tool.completed',
   TOOL_FAILED: 'tool.failed',
   PROVIDER_FALLBACK: 'provider.fallback',
@@ -269,6 +271,8 @@ export interface ToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
   readOnly?: boolean;
+  /** Non-read-only tools declare this to be offered to models under the approval policy. */
+  approval?: 'always' | 'never';
   capability?: string;
 }
 

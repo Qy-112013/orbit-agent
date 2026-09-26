@@ -10,6 +10,7 @@ import { createProviderFromEnv, createProviderRegistryFromEnv, ProviderRegistry 
 import { ProviderSummarizer } from './core/compaction.ts';
 import { JsonStore } from './core/store.ts';
 import { createDefaultTools } from './core/tools.ts';
+import { registerWorkspaceWriteTools } from './core/workspace-tools.ts';
 import { SkillRegistry } from './core/skills.ts';
 import { KnowledgeService, KNOWLEDGE_LIMITS } from './core/knowledge.ts';
 import { CONTEXT_LIMITS } from './core/conversation.ts';
@@ -171,9 +172,12 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   const memory = new MemoryService(store, vectors, { summarizer: compactor ?? undefined });
   const knowledge = new KnowledgeService(store, vectors);
   const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
+  // Only the web app registers side-effecting tools; the MCP server keeps the read-only set.
+  registerWorkspaceWriteTools(tools, { workspaceRoot, backupDir: join(dirname(dataFile), 'backups'), protectedDirs: [dirname(dataFile)] });
   const skills = await new SkillRegistry().loadDirectory(SKILLS_DIR);
   const orchestrator = new Orchestrator({ store, registry, memory, knowledge, provider: providerRuntime, tools, skills,
-    loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', ...loopOptions },
+    loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', toolPolicy: process.env.ORBIT_TOOL_POLICY === 'read-only' ? 'read-only' : 'approval',
+      ...(Number(process.env.ORBIT_APPROVAL_TIMEOUT_MS) > 0 ? { approvalTimeoutMs: Number(process.env.ORBIT_APPROVAL_TIMEOUT_MS) } : {}), ...loopOptions },
   });
 
   const runtime = { store, registry, memory, knowledge, vectors, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
@@ -228,6 +232,18 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
           knowledge: { method: vectors.enabled ? 'hybrid' : 'bm25', limits: KNOWLEDGE_LIMITS },
           retrieval: vectors.describe(),
         });
+        return;
+      }
+      if (method === 'GET' && parts[0] === 'api' && parts[1] === 'threads' && parts.length === 4 && parts[3] === 'approvals') {
+        requireThread(parts[2]);
+        sendJson(response, 200, { approvals: orchestrator.approvals.list(parts[2]) });
+        return;
+      }
+      if (method === 'POST' && parts[0] === 'api' && parts[1] === 'approvals' && parts.length === 3) {
+        const body = await readJson(request);
+        if (body.decision !== 'approve' && body.decision !== 'deny') throw Object.assign(new Error('decision must be approve or deny'), { code: 'VALIDATION_ERROR' });
+        const approval = await orchestrator.approvals.decide(parts[2], { approved: body.decision === 'approve', reason: typeof body.reason === 'string' ? body.reason : undefined });
+        sendJson(response, 200, { approvalId: approval.id, decision: body.decision });
         return;
       }
       if (method === 'GET' && pathname === '/api/agents') {
@@ -449,6 +465,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
     }
   });
 
+  // Pending side effects are denied, never left waiting, when the server stops.
+  server.on('close', () => { void orchestrator.approvals.close(); });
   return { server, runtime };
 }
 
