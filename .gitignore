@@ -19,3 +19,4 @@ node_modules/
 # Local secrets
 .env
 .env.local
+mcp.json

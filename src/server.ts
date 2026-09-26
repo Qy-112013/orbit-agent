@@ -11,6 +11,7 @@ import { ProviderSummarizer } from './core/compaction.ts';
 import { JsonStore } from './core/store.ts';
 import { createDefaultTools } from './core/tools.ts';
 import { registerWorkspaceWriteTools } from './core/workspace-tools.ts';
+import { McpManager } from './core/mcp-client.ts';
 import { SkillRegistry } from './core/skills.ts';
 import { KnowledgeService, KNOWLEDGE_LIMITS } from './core/knowledge.ts';
 import { CONTEXT_LIMITS } from './core/conversation.ts';
@@ -152,7 +153,7 @@ function providerStatus(provider) {
   };
 }
 
-export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, summarizer, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, loopOptions = {} } = {}) {
+export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.json'), provider, providers, embeddingProvider, summarizer, workspaceRoot = process.env.ORBIT_WORKSPACE_ROOT || PROJECT_DIR, mcpConfigPath = process.env.ORBIT_MCP_CONFIG || join(PROJECT_DIR, 'mcp.json'), loopOptions = {} } = {}) {
   const registry = new AgentRegistry(DEFAULT_AGENTS);
   const store = new JsonStore(dataFile, { seedAgents: registry.list() });
   await store.init();
@@ -174,13 +175,16 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   const tools = createDefaultTools({ memory, store, knowledge, workspaceRoot });
   // Only the web app registers side-effecting tools; the MCP server keeps the read-only set.
   registerWorkspaceWriteTools(tools, { workspaceRoot, backupDir: join(dirname(dataFile), 'backups'), protectedDirs: [dirname(dataFile)] });
+  // External MCP servers connect in the background; their tools appear in the registry once ready.
+  const mcp = new McpManager({ registry: tools, configPath: mcpConfigPath, cwd: workspaceRoot });
+  void mcp.start();
   const skills = await new SkillRegistry().loadDirectory(SKILLS_DIR);
   const orchestrator = new Orchestrator({ store, registry, memory, knowledge, provider: providerRuntime, tools, skills,
     loopOptions: { toolsEnabled: process.env.ORBIT_MODEL_TOOLS !== '0', toolPolicy: process.env.ORBIT_TOOL_POLICY === 'read-only' ? 'read-only' : 'approval',
       ...(Number(process.env.ORBIT_APPROVAL_TIMEOUT_MS) > 0 ? { approvalTimeoutMs: Number(process.env.ORBIT_APPROVAL_TIMEOUT_MS) } : {}), ...loopOptions },
   });
 
-  const runtime = { store, registry, memory, knowledge, vectors, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator };
+  const runtime = { store, registry, memory, knowledge, vectors, tools, skills, provider: providerRuntime, providers: providerRuntime, orchestrator, mcp };
   const requireThread = (threadId) => {
     const thread = store.getThread(threadId);
     if (!thread) throw Object.assign(new Error('thread not found'), { code: 'NOT_FOUND' });
@@ -440,6 +444,10 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         sendJson(response, 200, { tools: tools.list() });
         return;
       }
+      if (method === 'GET' && pathname === '/api/mcp') {
+        sendJson(response, 200, mcp.status());
+        return;
+      }
       if (method === 'GET' && pathname === '/api/providers') {
         sendJson(response, 200, { providers: providerRuntime instanceof ProviderRegistry ? providerRuntime.list() : [{ id: providerRuntime.id ?? 'default', adapter: providerRuntime.constructor.name, default: true }] });
         return;
@@ -466,7 +474,7 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
   });
 
   // Pending side effects are denied, never left waiting, when the server stops.
-  server.on('close', () => { void orchestrator.approvals.close(); });
+  server.on('close', () => { void orchestrator.approvals.close(); void mcp.close(); });
   return { server, runtime };
 }
 

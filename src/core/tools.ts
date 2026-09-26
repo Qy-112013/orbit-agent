@@ -59,7 +59,7 @@ export class ToolRegistry {
   }
 
   list() {
-    return [...this.tools.values()].map(({ execute, describe, ...metadata }) => metadata);
+    return [...this.tools.values()].map(({ execute, describe, validationSchema, ...metadata }) => metadata);
   }
 
   unregister(name) {
@@ -70,7 +70,7 @@ export class ToolRegistry {
   async describeCall(name, input, context) {
     const tool = this.tools.get(name);
     if (!tool) throw Object.assign(new Error(`unknown tool: ${name}`), { code: 'TOOL_NOT_FOUND' });
-    validateToolInput(tool.inputSchema ?? { type: 'object' }, input ?? {});
+    validateToolInput(tool.validationSchema ?? tool.inputSchema ?? { type: 'object' }, input ?? {});
     if (typeof tool.describe === 'function') return tool.describe(input ?? {}, context);
     return { summary: `${name}`, preview: JSON.stringify(input ?? {}, null, 2) };
   }
@@ -82,7 +82,8 @@ export class ToolRegistry {
       error.code = 'TOOL_NOT_FOUND';
       throw error;
     }
-    validateToolInput(tool.inputSchema ?? { type: 'object' }, input ?? {});
+    // External tools (MCP) supply a loose validationSchema: their schemas may use keywords this validator does not model.
+    validateToolInput(tool.validationSchema ?? tool.inputSchema ?? { type: 'object' }, input ?? {});
     return tool.execute(input ?? {}, context);
   }
 }
