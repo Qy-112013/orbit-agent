@@ -37,13 +37,32 @@ const MIME_TYPES = {
 };
 
 function headers(contentType = 'application/json; charset=utf-8') {
+  // No CORS: the UI is same-origin, and cross-origin pages must not drive tools or approvals.
   return {
     'content-type': contentType,
     'cache-control': 'no-store',
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-    'access-control-allow-headers': 'content-type',
   };
+}
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+function hostName(value: string): string {
+  return value.startsWith('[') ? value.slice(0, value.indexOf(']') + 1) : value.split(':')[0];
+}
+
+/** Blocks DNS rebinding (foreign Host) and cross-site writes (foreign Origin) before any API work. */
+export function checkRequestOrigin(request, allowedHosts: Set<string>): { code: string; message: string } | null {
+  const host = String(request.headers.host ?? '').toLowerCase();
+  if (!LOCAL_HOSTS.has(hostName(host)) && !allowedHosts.has(hostName(host))) {
+    return { code: 'HOST_NOT_ALLOWED', message: `host is not allowed: ${host || '(missing)'}` };
+  }
+  const origin = request.headers.origin;
+  if (origin && !['GET', 'HEAD'].includes(request.method ?? 'GET')) {
+    let originHost = '';
+    try { originHost = new URL(origin).host.toLowerCase(); } catch { /* malformed origins are rejected below */ }
+    if (originHost !== host) return { code: 'ORIGIN_NOT_ALLOWED', message: 'cross-origin requests are not allowed' };
+  }
+  return null;
 }
 
 function sendJson(response, status, payload) {
@@ -52,7 +71,8 @@ function sendJson(response, status, payload) {
 }
 
 function sendError(response, error) {
-  const code = error?.code === 'NOT_FOUND' ? 404 : error?.code === 'VALIDATION_ERROR' ? 400 : error?.code === 'CONFLICT' ? 409 : 500;
+  const code = error?.code === 'NOT_FOUND' ? 404 : error?.code === 'VALIDATION_ERROR' ? 400 : error?.code === 'CONFLICT' ? 409
+    : error?.code === 'HOST_NOT_ALLOWED' || error?.code === 'ORIGIN_NOT_ALLOWED' ? 403 : 500;
   sendJson(response, code, { error: { code: error?.code ?? 'INTERNAL_ERROR', message: String(error?.message ?? error) } });
 }
 
@@ -163,6 +183,7 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
     return thread;
   };
 
+  const allowedHosts = new Set((process.env.ORBIT_ALLOWED_HOSTS ?? '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean));
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
@@ -182,6 +203,8 @@ export async function createApp({ dataFile = join(PROJECT_DIR, 'data', 'state.js
         return;
       }
 
+      const denied = checkRequestOrigin(request, allowedHosts);
+      if (denied) throw Object.assign(new Error(denied.message), { code: denied.code });
       const parts = pathSegments(pathname);
       const method = request.method ?? 'GET';
 
