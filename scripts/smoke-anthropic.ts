@@ -7,6 +7,14 @@ import { AnthropicProvider } from '../src/core/anthropic-provider.ts';
 import { AgentLoop } from '../src/core/agent-loop.ts';
 import { parsePlan } from '../src/core/planner.ts';
 import { ProviderSummarizer } from '../src/core/compaction.ts';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ApprovalBroker } from '../src/core/approvals.ts';
+import { McpManager } from '../src/core/mcp-client.ts';
+import { ToolRegistry } from '../src/core/tools.ts';
+import { registerWorkspaceWriteTools } from '../src/core/workspace-tools.ts';
 
 const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
 if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
@@ -59,6 +67,42 @@ await check('tool round trip', async () => {
   const result = await loop.run({ agent, content: '请用 lookup_fact 工具分别查询 alpha 和 beta，然后告诉我两个值之和。', context },
     { threadId: 'smoke', runId: 'r1' }, async (type, payload: any) => { if (type.startsWith('tool.')) events.push(`${type}:${payload.tool}`); });
   return `steps=${JSON.stringify(result.metadata?.agentLoop)} events=${events.join(',')}\n${result.content.slice(0, 300)}`;
+});
+
+await check('approved workspace write', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'orbit-smoke-write-'));
+  try {
+    const registry = registerWorkspaceWriteTools(new ToolRegistry(), { workspaceRoot: root, backupDir: join(root, '.backups'), protectedDirs: [join(root, '.backups')] });
+    const approvals: string[] = [];
+    // Stands in for the human: approves every request as soon as it is published.
+    const broker = new ApprovalBroker({ emit: async (_threadId, type, payload: any) => {
+      if (type === 'approval.requested') { approvals.push(`${payload.tool}: ${payload.summary}`); await broker.decide(payload.approvalId, { approved: true }); }
+    } });
+    const loop = new AgentLoop({ provider, tools: registry, toolPolicy: 'approval', approvals: broker });
+    const result = await loop.run({ agent, content: '请用 workspace_write 工具创建文件 notes/hello.md，内容恰好是一行：你好，Orbit。完成后简短确认。', context },
+      { threadId: 'smoke', runId: 'r3' }, async () => {});
+    const written = await readFile(join(root, 'notes', 'hello.md'), 'utf8');
+    if (!written.includes('你好，Orbit')) throw new Error(`unexpected file content: ${JSON.stringify(written)}`);
+    if (!approvals.length) throw new Error('the write ran without an approval request');
+    return `approvals=${JSON.stringify(approvals)} file=${JSON.stringify(written)}\n${result.content.slice(0, 200)}`;
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+await check('mcp tool round trip', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'orbit-smoke-mcp-'));
+  const registry = new ToolRegistry();
+  const manager = new McpManager({ registry, configPath: join(dir, 'mcp.json'), cwd: dir });
+  try {
+    const fixture = fileURLToPath(new URL('../test/mcp-server-fixture.ts', import.meta.url));
+    await writeFile(join(dir, 'mcp.json'), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: ['--experimental-strip-types', '--no-warnings', fixture], autoApprove: ['echo'] } } }));
+    await manager.start();
+    const loop = new AgentLoop({ provider, tools: registry, toolPolicy: 'approval', approvals: new ApprovalBroker({ emit: async () => { throw new Error('echo is auto-approved'); } }) });
+    const events: string[] = [];
+    const result = await loop.run({ agent, content: '请调用 mcp__fixture__echo 工具，参数 text 为 "orbit-mcp-ok"，然后原样告诉我工具返回的文本。', context },
+      { threadId: 'smoke', runId: 'r4' }, async (type, payload: any) => { if (type.startsWith('tool.')) events.push(`${type}:${payload.tool}`); });
+    if (!events.includes('tool.completed:mcp__fixture__echo')) throw new Error(`echo was not called successfully: ${events.join(',')}`);
+    return `events=${events.join(',')}\n${result.content.slice(0, 200)}`;
+  } finally { await manager.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
 await check('structured plan', async () => {
