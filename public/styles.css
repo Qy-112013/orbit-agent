@@ -129,6 +129,16 @@ code { padding: 2px 5px; border-radius: 4px; color: #c7bcff; background: rgba(16
 .message.user .message-content { border-color: rgba(166,149,255,.22); border-radius: 12px 4px 12px 12px; color: #f2efff; background: #25213d; }
 .message.system .message-content { border-color: rgba(95,209,176,.16); border-radius: 9px; padding: 8px 13px; color: var(--teal); background: rgba(95,209,176,.06); font-size: 11px; }
 .message.streaming .message-content::after { content: '▍'; margin-left: 2px; color: var(--teal); animation: caret 1s steps(1) infinite; }
+.approval-card { max-width: 900px; margin-left: 41px; border: 1px solid rgba(246,163,121,.35); border-radius: 12px; padding: 12px 14px; background: rgba(246,163,121,.06); animation: rise .22s ease both; }
+.approval-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+.approval-badge { border-radius: 6px; padding: 2px 7px; color: #11131a; background: var(--orange); font-weight: 700; }
+.approval-tool { color: var(--text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 650; }
+.approval-summary { margin: 8px 0 6px; color: #dbe0f0; font-size: 13px; }
+.approval-preview { max-height: 260px; overflow: auto; margin: 0; border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; color: #c9cfe2; background: var(--bg); font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-actions { display: flex; gap: 8px; margin-top: 10px; }
+.approval-actions button { padding: 7px 14px; font-size: 12px; }
+.approval-actions .secondary-button { border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: transparent; }
+.approval-actions .secondary-button:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
 @keyframes caret { 50% { opacity: 0; } }
 .message-footer { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: #59627a; font-size: 10px; }
 .message-footer { flex-wrap: wrap; }
@@ -294,6 +304,7 @@ summary { cursor: pointer; }
   .timeline { max-height: none; min-height: 340px; }
   .message.user { padding-left: 5%; }
   .message.system { padding: 0; }
+  .approval-card { margin-left: 0; }
   .inspector { grid-template-columns: 1fr; }
   .trace-list, .memory-list, .task-list { max-height: 200px; }
   .composer-toolbar { align-items: flex-start; }

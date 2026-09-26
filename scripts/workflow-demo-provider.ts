@@ -31,6 +31,13 @@ export function createWorkflowDemoProvider() {
         : `演示步骤已核对原文：${hit.citation.text} [${hit.citation.id}]`);
     }
     if (input.content.startsWith('SLOW_TURN')) await delay(900);
+    if (input.content.startsWith('WRITE_TURN')) {
+      const result = input.transcript?.find((message) => message.role === 'tool');
+      const path = `notes/${input.content.includes('拒绝') ? 'denied' : 'approved'}.txt`;
+      // Markup in the preview proves approval cards render tool input as text.
+      if (!result) return answer('', [{ id: 'write', name: 'workspace_write', arguments: JSON.stringify({ path, content: 'Quartz 发布已审批\n<img src=x onerror="window.__orbitUnsafe=true">\n' }) }]);
+      return answer(result.content.includes('APPROVAL_DENIED') ? `演示：写入 ${path} 被拒绝。` : `演示：已写入 ${path}。`);
+    }
     if (input.content.startsWith('STREAM_TURN')) {
       const pieces = ['演示', '流式', '回答', '：逐段', '到达。'];
       for (const piece of pieces) { input.onDelta?.(piece); await delay(250); }

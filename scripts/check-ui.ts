@@ -66,7 +66,7 @@ try {
   if (!command) throw new Error('Install Chrome/Edge/Chromium or set ORBIT_BROWSER_COMMAND to its executable path.');
   await mkdir(output, { recursive: true });
   const embedding = embeddingFixture();
-  const app = await createApp({ dataFile: join(root, 'state.json'), workspaceRoot: root, provider: createWorkflowDemoProvider(), embeddingProvider: embedding, loopOptions: { toolsEnabled: true } });
+  const app = await createApp({ dataFile: join(root, 'data', 'state.json'), workspaceRoot: root, provider: createWorkflowDemoProvider(), embeddingProvider: embedding, loopOptions: { toolsEnabled: true } });
   server = app.server;
   const threadA = app.runtime.store.listThreads()[0].id;
   await app.runtime.store.updateThread(threadA, { title: '会话 A · Quartz 发布' });
@@ -137,6 +137,28 @@ try {
   await when('!document.querySelector("#timeline .message.streaming")', 'preview replaced');
   assert.equal(await evaluate('[...document.querySelectorAll("#timeline .message.assistant .message-content")].at(-1).textContent'), '演示流式回答：逐段到达。');
   assert.equal(await evaluate(`${state}.events.some((event) => event.type === "agent.delta")`), false);
+
+  console.log('UI: approving and denying a side-effecting tool call');
+  const approvalRound = async (content, decision) => {
+    const before = await evaluate(`${state}.currentThread.messages.length`);
+    await set('#message-input', content);
+    await evaluate('document.querySelector("#composer").requestSubmit()');
+    await when('document.querySelector("#timeline .approval-card")', 'approval card');
+    await when('document.querySelector("#run-label").textContent === "等待审批…"', 'waiting-for-approval label');
+    assert.match(await evaluate('document.querySelector("#timeline .approval-card .approval-preview").textContent'), /<img src=x onerror=/);
+    assert.equal(await evaluate('document.querySelector("#timeline .approval-card .approval-tool").textContent'), 'workspace_write');
+    if (decision === 'approve') await capture('approval.png');
+    await click(`#timeline .approval-card [data-approval-decision="${decision}"]`);
+    await when(`${state}.currentThread.messages.length === ${before + 2} && !${state}.busy && !document.querySelector("#timeline .approval-card")`, `answer after ${decision}`);
+    return evaluate('[...document.querySelectorAll("#timeline .message.assistant .message-content")].at(-1).textContent');
+  };
+  await assert.rejects(access(join(root, 'notes', 'approved.txt')));
+  assert.match(await approvalRound('WRITE_TURN 写入审批演示', 'approve'), /已写入 notes\/approved\.txt/);
+  assert.match(await readFile(join(root, 'notes', 'approved.txt'), 'utf8'), /^Quartz 发布已审批/);
+  assert.match(await approvalRound('WRITE_TURN 这次请拒绝', 'deny'), /被拒绝/);
+  await assert.rejects(access(join(root, 'notes', 'denied.txt')));
+  assert.equal(await evaluate(`${state}.events.filter((event) => event.type === "approval.resolved").map((event) => event.payload.approved).join()`), 'true,false');
+  assert.equal(await evaluate('Boolean(window.__orbitUnsafe)'), false);
 
   console.log('UI: switching threads during an active request and preserving drafts');
   await set('#message-input', 'SLOW_TURN 会话 A 的慢请求');
@@ -214,7 +236,7 @@ try {
   await capture('embedding.png');
   assert.equal(await evaluate('Boolean(window.__orbitUnsafe)'), false);
   assert.deepEqual(cdp.errors, [], 'browser console must have no uncaught exceptions');
-  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, provider: 'scripted-demo', embedding: 'deterministic-fixture', realModelCalls: 0, checks: ['document import', 'streaming preview', 'source escaping', 'retrieval citations', 'late-response isolation', 'per-thread drafts', 'plan/review/replan', 'desktop layout', 'rename', 'branch', 'archive/restore', 'thread search', 'semantic retrieval', 'index backfill', 'embedding fallback/recovery'], screenshots: ['desktop.png', 'embedding.png'], consoleErrors: cdp.errors }, null, 2));
+  await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, provider: 'scripted-demo', embedding: 'deterministic-fixture', realModelCalls: 0, checks: ['document import', 'streaming preview', 'tool approval/denial', 'source escaping', 'retrieval citations', 'late-response isolation', 'per-thread drafts', 'plan/review/replan', 'desktop layout', 'rename', 'branch', 'archive/restore', 'thread search', 'semantic retrieval', 'index backfill', 'embedding fallback/recovery'], screenshots: ['approval.png', 'desktop.png', 'embedding.png'], consoleErrors: cdp.errors }, null, 2));
   console.log(`UI smoke passed. Artifacts: ${output}`);
 } catch (error) {
   if (browserError && !cdp) console.error(browserError);

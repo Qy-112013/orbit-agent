@@ -27,6 +27,8 @@ const EVENT_NAMES = [
   'agent.completed',
   'agent.failed',
   'tool.called',
+  'approval.requested',
+  'approval.resolved',
   'execution.completed',
 ];
 
@@ -54,6 +56,9 @@ const state = {
   pendingThreads: new Set(),
   /** runId -> { agentId, step, text }; live previews replaced by persisted messages. */
   streaming: new Map(),
+  /** Pending tool approvals for the selected thread, oldest first. */
+  approvals: [],
+  approvalRefresh: 0,
   threadRefresh: 0,
   listRefresh: 0,
   auxiliaryRefresh: 0,
@@ -211,7 +216,51 @@ function renderThread() {
     if (!state.busy || thread.messages.some((message) => message.metadata?.runId === runId)) state.streaming.delete(runId);
   }
   renderStreaming(followTail);
+  renderApprovals(followTail);
   if (followTail) timeline.scrollTop = timeline.scrollHeight;
+}
+
+/** Approval cards stay after messages and live previews at the end of the timeline. */
+function renderApprovals(followTail) {
+  const timeline = $('#timeline');
+  const stick = followTail ?? timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop < 100;
+  for (const node of timeline.querySelectorAll('.approval-card')) node.remove();
+  for (const approval of state.approvals) {
+    const agent = agentById(approval.agentId);
+    const node = document.createElement('article');
+    node.className = 'approval-card';
+    node.dataset.approvalId = approval.id;
+    node.innerHTML = `<div class="approval-head"><span class="approval-badge">等待审批</span><span class="approval-tool">${escapeHtml(approval.tool)}</span><span class="approval-agent">${escapeHtml(agent?.name ?? approval.agentId)} · ${formatTime(approval.expiresAt)} 前未处理将自动拒绝</span></div>
+      <div class="approval-summary">${escapeHtml(approval.summary)}</div>
+      <pre class="approval-preview">${escapeHtml(approval.preview)}</pre>
+      <div class="approval-actions"><button class="primary-button" type="button" data-approval-decision="approve">批准执行</button><button class="secondary-button" type="button" data-approval-decision="deny">拒绝</button></div>`;
+    timeline.append(node);
+  }
+  if (stick) timeline.scrollTop = timeline.scrollHeight;
+}
+
+function updateRunLabel() {
+  if (state.busy && state.approvals.length) $('#run-label').textContent = '等待审批…';
+}
+
+async function refreshApprovals(threadId) {
+  const requestId = ++state.approvalRefresh;
+  const payload = await api(`/api/threads/${encodeURIComponent(threadId)}/approvals`);
+  if (state.selectedThreadId !== threadId || requestId !== state.approvalRefresh) return;
+  state.approvals = payload.approvals ?? [];
+  if (state.currentThread?.messages.length) renderApprovals();
+  updateRunLabel();
+}
+
+async function decideApproval(button) {
+  const card = button.closest('.approval-card');
+  const threadId = state.selectedThreadId;
+  card.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+  try {
+    await api(`/api/approvals/${encodeURIComponent(card.dataset.approvalId)}`, { method: 'POST', body: JSON.stringify({ decision: button.dataset.approvalDecision }) });
+  } finally {
+    if (state.selectedThreadId === threadId) await refreshApprovals(threadId);
+  }
 }
 
 function renderStreaming(followTail) {
@@ -230,7 +279,7 @@ function renderStreaming(followTail) {
       node.dataset.runId = runId;
       node.innerHTML = `<div class="message-avatar" style="background:${escapeHtml(agent?.color ?? '#a695ff')}">${escapeHtml(agent?.emoji ?? name.slice(0, 1))}</div>
         <div class="message-body"><div class="message-meta"><span class="message-author">${escapeHtml(name)}</span><span class="message-role">正在生成…</span></div><div class="message-content"></div></div>`;
-      timeline.append(node);
+      timeline.insertBefore(node, timeline.querySelector('.approval-card'));
     }
     node.querySelector('.message-content').textContent = preview.text;
   }
@@ -272,12 +321,15 @@ const TRACE_LABELS = {
   'agent.completed': ['Agent completed', '结果已持久化'],
   'agent.failed': ['Agent failed', '已记录失败并保持线程可用'],
   'tool.called': ['Tool called', '安全工具完成一次调用'],
+  'approval.requested': ['Approval requested', '等待人工批准工具调用'],
+  'approval.resolved': ['Approval resolved', '审批结果已记录'],
   'execution.completed': ['Turn completed', '本轮协作闭环完成'],
 };
 
 function traceClass(event) {
   const type = event.type;
   if (type === 'plan.completed' && event.payload?.status !== 'completed') return 'error';
+  if (type === 'approval.resolved') return event.payload?.approved ? 'success' : 'error';
   if (type.endsWith('failed')) return 'error';
   if (type.endsWith('completed') || type === 'tool.called') return 'success';
   return '';
@@ -299,6 +351,8 @@ function traceDetail(event) {
   if (event.type === 'agent.failed') return `${payload.agentName ?? payload.agentId ?? ''}: ${payload.error ?? 'unknown error'}`;
   if (event.type === 'agent.started' || event.type === 'agent.completed') return payload.agentName ?? payload.agentId ?? '';
   if (event.type === 'tool.called') return payload.tool ?? '';
+  if (event.type === 'approval.requested') return `${payload.agentId} · ${payload.tool} · ${payload.summary ?? ''}`;
+  if (event.type === 'approval.resolved') return `${payload.tool} · ${payload.approved ? '已批准' : payload.by === 'timeout' ? '超时拒绝' : '已拒绝'}${payload.reason ? ' · ' + payload.reason : ''}`;
   if (event.type === 'execution.completed') return `${payload.strategy ?? 'serial'} · ${payload.latencyMs ?? 0}ms`;
   return '';
 }
@@ -524,6 +578,7 @@ function setBusy(value, label = 'Agent 正在处理…') {
   $('#fork-thread').disabled = loading;
   $('#run-indicator').classList.toggle('hidden', !value);
   $('#run-label').textContent = label;
+  updateRunLabel();
 }
 
 let refreshTimer;
@@ -554,6 +609,7 @@ function connectEvents(threadId) {
         if (eventName === 'agent.started') setBusy(true, `${record.payload?.agentName ?? 'Agent'} is thinking…`);
         if (eventName === 'plan.created') state.selectedPlanId = record.payload.planId;
         if (eventName === 'execution.completed') setBusy(state.pendingThreads.has(threadId));
+        if (eventName.startsWith('approval.')) refreshApprovals(threadId).catch((error) => showToast(error.message, 'error'));
         if (eventName.startsWith('plan.') || ['message.accepted', 'agent.completed', 'agent.failed', 'execution.completed'].includes(eventName)) scheduleRefresh(threadId);
       } catch {
         // Ignore malformed stream frames; the next HTTP refresh remains the
@@ -588,12 +644,15 @@ function connectEvents(threadId) {
 
 async function refreshThread(threadId, connect = true) {
   const requestId = ++state.threadRefresh;
-  const [payload, trace] = await Promise.all([
+  const approvalRequestId = ++state.approvalRefresh;
+  const [payload, trace, approvals] = await Promise.all([
     api(`/api/threads/${encodeURIComponent(threadId)}`),
     api(`/api/threads/${encodeURIComponent(threadId)}/events`),
+    api(`/api/threads/${encodeURIComponent(threadId)}/approvals`),
   ]);
   if (state.selectedThreadId !== threadId || requestId !== state.threadRefresh) return;
   state.currentThread = payload.thread;
+  if (approvalRequestId === state.approvalRefresh) state.approvals = approvals.approvals ?? [];
   state.events = [...new Map([...(trace.events ?? []), ...state.events].filter((event) => event.threadId === threadId).map((event) => [event.id, event])).values()].sort((a, b) => a.sequence - b.sequence).slice(-500);
   renderThread();
   renderTrace();
@@ -647,6 +706,8 @@ async function selectThread(threadId) {
     state.selectedPlanId = null;
     state.currentThread = null;
     state.events = [];
+    state.approvals = [];
+    state.approvalRefresh += 1;
     state.plans = [];
     state.documents = [];
     state.memories = [];
@@ -774,6 +835,8 @@ $('#fork-thread').addEventListener('click', () => openThreadDialog('fork'));
 $('#archive-thread').addEventListener('click', handleAction(archiveThread));
 $('#thread-form').addEventListener('submit', handleAction(saveThreadDialog));
 $('#timeline').addEventListener('click', (event) => {
+  const decision = event.target.closest('[data-approval-decision]');
+  if (decision) { handleAction(decideApproval)(decision); return; }
   const button = event.target.closest('[data-fork-message]');
   if (button) openThreadDialog('fork', button.dataset.forkMessage);
 });
