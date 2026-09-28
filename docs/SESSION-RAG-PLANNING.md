@@ -1,6 +1,6 @@
 # 多轮会话、知识库与计划执行
 
-v0.3 在原有协作运行时上增加了持续会话、文档 RAG 和显式计划执行。界面以桌面工作台为入口，没有引入新的 npm 运行时依赖。
+当前实现核对日期：2026-09-28。v0.3 提供持续会话、文档 RAG 和显式计划执行，后续实现已补齐模型摘要、流式输出、审批工具及 CLI 原生会话续接。运行时依赖包含 `@anthropic-ai/sdk`，配置见 [README](../README.md)。
 
 ## 快速使用
 
@@ -51,18 +51,21 @@ flowchart LR
 
 模型或 CLI 降级为 LocalProvider 时，计划会停止并标为 blocked；演示回答不能通过真实验收。服务重启后，运行中的计划标为 interrupted，保留已完成的证据，不自动重复执行结果未知的步骤。界面可以把原目标带回输入区，重新发起一个计划。
 
-复核是模型对证据和验收标准的判断，不是测试工具、权限审批或发布许可的替代。内置工具提供只读资料访问；具体文件修改能力取决于显式配置的外部 CLI，它的权限与内部工具由 CLI 自身管理。
+复核是模型对证据和验收标准的判断，不是测试工具、权限审批或发布许可的替代。Web 内置工具已支持审批后的文件写入、编辑与 shell；规划/复核阶段只返回结构化结果，步骤阶段可调用工具。外部 CLI 的权限与内部工具仍由 CLI 自身管理。
 
 ## 多轮会话与上下文
 
 会话消息、当前 Agent、摘要、文档和计划存入本地状态文件。相同会话的并发请求按到达顺序执行；不同会话可以独立运行。归档与新消息的检查在串行写入过程中完成，避免并发请求写入已经归档的会话。
 
-上下文使用近期消息加历史摘录。摘要按消息序号和发言者标注，采用规则式摘录，不额外请求模型；超过预算时保留开头和最新片段并标记裁剪。它是有损上下文，不能保证保留每个历史细节。当前用户问题在模型请求中只出现一次，API Provider 保留 user/assistant 角色；CLI Provider 接收同一份有界上下文。
+上下文使用稳定的历史前缀加摘要。未超过阈值时追加历史；超过消息数或字符预算后，把较早消息纳入摘要并保留最近消息。正常环境装配使用默认 Provider 生成模型摘要（`llm-v1`），保留目标、决定、约束、来源与未决问题；未配置真实模型、摘要失败或本地降级时使用抽取式摘要（`extractive-v1`），记录 `fallbackReason`。测试显式注入 Provider 时默认不调用模型摘要，可另注入 summarizer。
+
+摘要和截断都是有损的，不能保证保留每个历史细节。当前消息从历史组装中排除后单独发送，API Provider 保留 user/assistant 角色；CLI Provider 接收同样有界的 Orbit 上下文。
 
 | 召回内容 | 默认限制 |
 | --- | --- |
-| 近期消息 | 最多 12 条，正文合计 12,000 字符，单条最多 4,000 字符 |
-| 历史摘录 | 最多 5,000 字符 |
+| 未压缩历史 | 最多 24 条，正文合计 24,000 字符，单条最多 4,000 字符 |
+| 超限压缩后保留 | 最近最多 8 条，正文合计 8,000 字符 |
+| 模型或抽取式摘要 | 最多 5,000 字符 |
 | 长期记忆 | 正文合计最多 4,000 字符 |
 | 文档与前序 Agent 引用原文 | 正文合计最多 7,000 字符 |
 
@@ -70,7 +73,9 @@ flowchart LR
 
 切换会话时，草稿和执行方式在当前浏览器页面内分别保留；迟到的 HTTP/SSE 回调会核对会话 ID，避免覆盖另一条会话。刷新浏览器后恢复上次选择的会话，未发送草稿不持久化到服务器。
 
-CLI 每轮仍启动新的非交互进程，连续对话依靠 Orbit 重建上下文；这不等于 Claude Code、Codex 或 Pi 的原生 session resume。
+CLI 每轮启动新的非交互进程并接收 Orbit 上下文；Codex 与 Claude Code 已支持原生 session resume，按 threadId/agentId 保存 sessionId 和配置指纹。指纹匹配时续接，分支不继承绑定，并发辅助 run 不共享同一绑定。Pi 尚无原生续接实现。
+
+`DELETE /api/threads/:id/agents/:agentId/session` 清除 Orbit 绑定，下一轮新建 CLI 会话；运行中返回 409，不删除外部 CLI 历史。没有专门的会话管理 UI。CLI 原生会话续接与计划/工具的断点恢复不同，重启仍不会自动续跑未完成任务。
 
 ## 文档 RAG 与引用
 
@@ -99,6 +104,7 @@ CLI 每轮仍启动新的非交互进程，连续对话依靠 Orbit 重建上下
 | POST | `/api/threads/:id/messages` | 普通、协作或 `#plan` 请求 |
 | GET | `/api/threads/:id/plans` | 当前会话的计划与版本历史 |
 | GET | `/api/threads/:id/plans/:planId` | 指定计划的状态和结果 |
+| DELETE | `/api/threads/:id/agents/:agentId/session` | 清除指定 Agent 的 CLI 会话绑定 |
 | GET/POST | `/api/knowledge/documents` | 查询或导入文档 |
 | GET/DELETE | `/api/knowledge/documents/:id` | 读取原文或移除文档 |
 | GET | `/api/knowledge/search?q=关键词&threadId=...` | 查询原文片段 |
@@ -107,7 +113,7 @@ CLI 每轮仍启动新的非交互进程，连续对话依靠 Orbit 重建上下
 
 新增事件包括 `context.compacted`、`knowledge.retrieved`、`plan.created`、`plan.updated`、`plan.step.*`、`plan.reviewed`、`plan.replanned` 和 `plan.completed`。每个计划步骤对应消息和 run，保留 planId、planRevision、planStepId 与 requestMessageId。
 
-普通事件查询默认返回最新 500 条。显式 `after` 查询按序向后读取；SSE 重连优先使用 Last-Event-ID，避免 URL 中的初始游标造成反复回放。
+普通事件查询默认返回最新 500 条。显式 `after` 查询按序向后读取；SSE 重连优先使用 Last-Event-ID，按每页 500 条补放仍保留的持久事件。`agent.delta` 是无 SSE id、不持久化的文本增量，断线期间不会补发；最终回复通过消息刷新恢复。CLI 绑定/重置另有 `session.bound` / `session.reset` 事件。
 
 JsonStore 当前为 schema v2，兼容读取 v1 数据。每会话保留最近 500 条消息，工作区保留最近 1,200 条事件和最多 100 个计划；计划达到上限时优先清理较早的终态记录。存储仍面向单进程，不支持多进程同时写一个 JSON 文件。MCP stdio 使用独立的 `data/mcp-state.json`，共享工具实现，不会自动同步 Web 的状态文件。
 
@@ -120,7 +126,9 @@ npm run demo:workflow
 npm run check:ui
 ```
 
-`demo:workflow` 使用脚本模拟模型决策，实际完成摘要、检索、工具执行、复核后重规划和状态恢复；不需要密钥，也不调用真实模型。它验证运行时协议，真实模型的任务完成质量需使用已配置的 Provider 另行检验。
+`npm run check` 仅检查语法，不运行 TypeScript 类型检查。
+
+`demo:workflow` 使用脚本模拟模型决策，实际完成摘要、检索、工具执行、复核后重规划和持久状态读取；不需要密钥，也不调用真实模型。它验证运行时协议，真实模型的任务完成质量需使用已配置的 Provider 另行检验。
 
 `check:ui` 使用本机 Chrome / Edge / Chromium 的独立临时配置，验证桌面端文档导入、原文转义、引用显示、运行中会话切换、草稿隔离、计划版本、重命名、分支和归档恢复。可通过 `ORBIT_BROWSER_COMMAND` 指定浏览器可执行文件。截图和验证结果写入被忽略的 `.orbit-artifacts/ui/`，原有会话数据不会被替换。
 

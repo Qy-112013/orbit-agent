@@ -1,6 +1,7 @@
 # Architecture notes
 
-Orbit Agent is an independent, dependency-free agent workspace. Its design
+Orbit Agent is an independently implemented agent workspace. The current
+runtime includes the official Anthropic SDK dependency. Its design
 focuses on a small set of explicit boundaries that are easy to inspect and
 replace:
 
@@ -14,6 +15,10 @@ replace:
 
 The runtime keeps provider and storage integrations behind local interfaces so
 the core workflow remains deterministic and easy to run on a fresh checkout.
+
+The source comparisons below are historical provenance records, not a current
+feature inventory. Current capabilities and limits are documented in
+[CORE-FEATURES.md](CORE-FEATURES.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 本次协作扩展的来源记录
 

@@ -1,5 +1,8 @@
 # 子项目 2：流式输出与 LLM 上下文压缩 — 设计
 
+> 历史设计稿；实现状态核对：2026-09-28。API 文本流式、瞬时 agent.delta、稳定历史前缀、模型摘要及抽取式兜底已实现。CLI 实时流式仍未实现；MCP 客户端与工具审批已由后续实现补齐。 当前使用与限制以 [核心能力](../../CORE-FEATURES.md)、[架构](../../ARCHITECTURE.md) 和 [实现说明](../../IMPLEMENTATION.md) 为准。以下保留当时设计背景。
+
+
 日期：2026-09-25
 范围：P0 token 级流式；P1 LLM 上下文压缩；把 12 条滑动窗口改为稳定检查点，使跨轮次 prompt caching 可命中。
 不在范围：CLI provider（codex / claude-code / pi）的流式；MCP、写入工具、审批（子项目 3）。

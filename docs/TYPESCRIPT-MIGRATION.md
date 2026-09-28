@@ -19,8 +19,13 @@ the core seams explicit:
 Node 25 runs `.ts` files with `--experimental-strip-types`. The code avoids
 TypeScript features that require a transform (for example parameter
 properties, enums and namespaces), so the same modules remain directly
-executable while `tsconfig.json` provides a strict-checking target for a
-future emitted build.
+executable. `tsconfig.json` declares `strict: true` and `noEmit: true`, but
+Node type stripping does not check types. `npm run check` runs syntax checks
+only; the package does not yet provide a complete type-checking gate.
+
+Current runtime dependencies include `@anthropic-ai/sdk`. After cloning, run
+`npm ci` before starting the app. Source and tests use `.ts`; the browser
+client and `scripts/check-syntax.mjs` remain JavaScript.
 
 ## Next boundaries
 

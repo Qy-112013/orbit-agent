@@ -1,5 +1,8 @@
 # 子项目 3：MCP client、写入工具、人工审批与沙箱 — 设计
 
+> 历史设计稿；实现状态核对：2026-09-28。Host/Origin 加固、逐次审批、写入/编辑/shell 和 MCP stdio 客户端已实现。下文“现状”是设计前状态，当前响应不含 CORS 头。文件策略允许 .env.example 模板；CLI/MCP/shell 不具备 OS 沙箱。审批预览有字符上限，不保证完整展示超长命令。 当前使用与限制以 [核心能力](../../CORE-FEATURES.md)、[架构](../../ARCHITECTURE.md) 和 [实现说明](../../IMPLEMENTATION.md) 为准。以下保留当时设计背景。
+
+
 日期：2026-09-26
 范围：P0 MCP client；P0 写入类工具（写文件、编辑文件、执行 shell）+ 逐次人工审批 + 沙箱约束；前置的 HTTP 安全加固。
 用户约束：**agent 不得删除文件**。

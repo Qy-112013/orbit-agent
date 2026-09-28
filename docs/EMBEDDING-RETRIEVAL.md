@@ -1,6 +1,6 @@
 # Embedding 与向量检索
 
-知识库和长期记忆支持 OpenAI-compatible embedding、余弦向量检索及关键词混合召回。HTTP、Agent 的 `search_knowledge` / `search_memory` 工具和 MCP 共用实现，没有新增 npm 依赖，也不需要运行独立的向量数据库。
+知识库和长期记忆支持 OpenAI-compatible embedding、余弦向量检索及关键词混合召回。HTTP、Agent 的 `search_knowledge` / `search_memory` 工具和 MCP 共用实现，embedding 模块使用 Node HTTP 能力，不需要运行独立的向量数据库。项目整体另有 Anthropic SDK 依赖。
 
 ## 启用
 
@@ -81,4 +81,6 @@ npm run demo:workflow
 npm run check:ui
 ```
 
-新增测试使用确定性的模拟向量，覆盖无共同词的召回、HTTP 请求批量与顺序、异常向量、超时与降级、会话隔离、长期记忆片段、缓存复用、模型切换、并发删除、HTTP / Agent / MCP 链路。它们验证实现行为；真实模型的检索质量需要使用你选择的 embedding 服务和实际资料评估。
+`npm run check` 只检查语法，不运行 TypeScript 类型检查。
+
+检索测试使用确定性的模拟向量，覆盖无共同词的召回、HTTP 请求批量与顺序、异常向量、超时与降级、会话隔离、长期记忆片段、缓存复用、模型切换、并发删除、HTTP / Agent / MCP 链路。它们验证实现行为；真实模型的检索质量需要使用你选择的 embedding 服务和实际资料评估。

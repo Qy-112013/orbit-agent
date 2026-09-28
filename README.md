@@ -38,7 +38,7 @@ Orbit 不试图做一个无边界的“超级 Agent”。它提供一条小而�
 
 ## 当前能力
 
-v0.3 新增长会话摘要、会话管理、文档 RAG 和 `#plan` 执行流程。运行 `npm run demo:workflow` 可无密钥体验检索、复核反馈和重规划；使用方式与实现边界见 [会话、知识库与计划](docs/SESSION-RAG-PLANNING.md)。原有委派与两轮讨论见 [协作扩展](docs/COLLABORATION-EXTENSION.md)。
+当前 v0.3 代码已实现会话管理、模型摘要及抽取式兜底、文档 RAG、`#plan`、API 流式、工具审批、MCP 客户端，以及 Codex / Claude Code 原生会话续接。运行 `npm run demo:workflow` 可无密钥体验检索、复核反馈和重规划；使用方式与实现边界见 [会话、知识库与计划](docs/SESSION-RAG-PLANNING.md)。原有委派与两轮讨论见 [协作扩展](docs/COLLABORATION-EXTENSION.md)。
 
 下面这些能力已经在当前版本实现，并由 Node 内置测试覆盖关键路径：
 
@@ -54,12 +54,15 @@ v0.3 新增长会话摘要、会话管理、文档 RAG 和 `#plan` 执行流程�
 | **长期记忆与引用** | 用 `记住：...` 或 API 写入事实，支持语义与关键词混合召回；关键词排序保留重要性和时间衰减，引用为 `memory:<id>`。 |
 | **Agent 委派与回传** | 支持工具调用的 API 模型可通过 `delegate_to_agent` 请求其他 Agent 协助；每轮最多 2 次、深度 1 层，保留父子 run 与消息引用。 |
 | **两轮讨论与汇总** | `#discuss` 让 2–4 个 Agent 先独立判断，再阅读前轮观点复核，最后由第一个 Agent 汇总共识与分歧；兼容 API 和 CLI Provider。 |
-| **ReAct 式工具循环** | 单个 Agent 最多 5 次模型调用、8 次工具请求；检索知识、读取 workspace 并根据真实工具结果继续回答，记录每一步事件。 |
+| **ReAct 式工具循环** | 单个 Agent 默认最多 5 次模型调用、8 次工具请求；检索和读取资料，审批后写入、编辑文件或执行 shell，并根据真实结果继续回答。 |
+| **逐次人工审批** | 展示工具及变更预览，支持批准、拒绝与超时；文件覆盖前备份，审批事件可追踪。 |
+| **API 流式与可靠性** | OpenAI-compatible / Anthropic 文本增量、有限重试、结构化输出和缓存用量记录；长会话使用模型摘要及抽取式兜底。 |
 | **任务抽取与追踪** | 用 `任务：...` 创建带 owner 的待办任务，也可以通过 API 查询和更新状态。 |
 | **Skills 与 allow-list 工具** | 从 `skills/` 加载 Markdown Skill，并通过受限工具访问记忆、任务和 workspace 文本。 |
 | **可回放执行轨迹** | 路由、上下文检索、Agent 开始/完成/失败等事件持久化，HTTP API 和 SSE 都可读取。 |
-| **Provider 可替换与降级** | 默认无需密钥即可离线演示；OpenAI-compatible 或本地 CLI 失败时自动回退到 LocalProvider。 |
-| **MCP stdio 接口** | MCP 客户端可使用同一组 allow-list 工具和 Skill resources，不获得任意 shell 权限。 |
+| **Provider 可替换与降级** | 按 Agent 使用 OpenAI-compatible、Anthropic 或本地 CLI，失败留痕并回退 LocalProvider；无需密钥也可离线演示。 |
+| **CLI 原生会话续接** | Codex / Claude Code 按线程和 Agent 保存会话绑定，配置指纹匹配时续接；支持 API 重置。 |
+| **MCP stdio 双向接入** | Orbit 提供默认工具与 Skill resources，也可连接外部 MCP server；外部工具默认逐次审批，可显式配置免审批。 |
 
 ### 三个默认 Agent
 
@@ -77,13 +80,14 @@ v0.3 新增长会话摘要、会话管理、文档 RAG 和 `#plan` 执行流程�
 
 - Node.js 25 或更高版本（直接运行 `.ts` 文件使用 Node 的 type stripping）
 - Git（仅在从仓库克隆时需要）
-- 不需要 pnpm、Redis、数据库或 API key
+- 不需要 pnpm、Redis、数据库或 API key；依赖包含 `@anthropic-ai/sdk`
 
 ### 启动 Web 工作台
 
 ```bash
 git clone https://github.com/Qy-112013/orbit-agent.git
 cd orbit-agent
+npm ci
 npm start
 ```
 
@@ -94,7 +98,7 @@ npm start
 ```bash
 npm run dev     # watch 模式
 npm test        # 运行测试
-npm run check   # 检查源码语法
+npm run check   # 检查源码语法，不执行 TypeScript 类型检查
 npm run mcp     # 启动 MCP stdio server
 npm run demo:collaboration  # 无密钥验证委派、回传与讨论
 npm run demo:workflow       # 无密钥验证会话、RAG 与重规划
@@ -143,7 +147,7 @@ npm start
 ```bash
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=你的模型ID
 npm start
 ```
 
@@ -155,11 +159,26 @@ $env:ORBIT_ATLAS_BASE_URL="https://api.deepseek.com/v1"
 $env:ORBIT_ATLAS_MODEL="deepseek-reasoner"
 $env:ORBIT_LENS_API_KEY="..."
 $env:ORBIT_LENS_BASE_URL="https://api.openai.com/v1"
-$env:ORBIT_LENS_MODEL="gpt-4o-mini"
+$env:ORBIT_LENS_MODEL="你的模型ID"
 npm start
 ```
 
-解析顺序是：Agent 专属配置 → 显式注册的 Provider → 默认 Provider。当前映射可通过 `GET /api/providers` 查看。
+示例中的“你的模型ID”需替换为网关实际支持的名称，建议显式设置模型。Agent 专属 OpenAI-compatible 配置需要对应的 `ORBIT_<AGENT>_API_KEY`，仅填写 MODEL/BASE_URL 不会创建专属适配器。
+
+解析顺序是：Agent 专属配置 → 显式注册的 Provider → 默认 Provider。当前映射可通过 `GET /api/providers` 查看。API 默认开启流式，兼容网关不支持时可设 `OPENAI_STREAM=0`。临时错误会有限重试，耗尽后降级，恢复成功清除最近错误。
+
+这些变量读取自进程环境，`npm start` 不自动加载 `.env`。可在终端设置，或明确运行 `node --env-file=.env.local --experimental-strip-types src/server.ts` 载入本地配置。
+
+### 原生 Anthropic
+
+```powershell
+$env:ANTHROPIC_API_KEY="你的 Anthropic 密钥"
+$env:ANTHROPIC_MODEL="你的Anthropic模型ID"
+$env:ORBIT_DEFAULT_PROVIDER="anthropic"
+npm start
+```
+
+只有 Anthropic 密钥时自动选用；两类密钥同时存在时可用 `ORBIT_DEFAULT_PROVIDER` 选择。单个 Agent 可设 `ORBIT_<AGENT>_PROVIDER=anthropic`，密钥优先使用 Agent 专属配置，再使用 `ANTHROPIC_API_KEY`。支持 SDK 流式、工具调用、JSON Schema、prompt caching 和 usage 记录；可配置 `ANTHROPIC_BASE_URL`、`ANTHROPIC_EFFORT`、`ANTHROPIC_TIMEOUT_MS` 和 `ANTHROPIC_MAX_TOKENS`。实际模型需支持所用请求参数。
 
 ### Codex、Claude Code 和 Pi
 
@@ -177,7 +196,9 @@ npm start
 
 无论真实 Provider 发生超时、错误还是空结果，失败都会写入执行轨迹，线程保留，并自动回退到 `LocalProvider`。
 
-Windows 混合启动可先运行 `.\scripts\start-hybrid.ps1 -CheckOnly`。脚本会检查 Node 和 Claude Code 的实际路径；正式启动时在本地终端输入密钥。CLI 每轮会接收 Orbit 重建的历史上下文，当前没有使用外部 CLI 的原生 session resume。
+Windows 混合启动可先运行 `.\scripts\start-hybrid.ps1 -CheckOnly`。脚本会检查 Node 和 Claude Code 的实际路径；正式启动时在本地终端输入密钥。CLI 每轮会接收 Orbit 重建的有限上下文。Codex 与 Claude Code 已按线程/Agent 保存原生 session；Provider、命令参数、cwd、角色及 system prompt 指纹匹配时自动续接。Pi 暂无此实现，分支不继承绑定。
+
+可通过 `DELETE /api/threads/:id/agents/:agentId/session` 清除 Orbit 绑定，下一轮开启新会话；运行中返回 409。此操作不删除外部 CLI 历史。CLI 当前仍等待进程结束才解析输出，没有实时增量桥接或专门的会话管理 UI；原生续接不等于执行任务的断点续跑。
 
 ## 产品界面
 
@@ -206,9 +227,11 @@ Orchestrator
    ├─ MemoryService   recent conversation + durable excerpts + memory
    ├─ KnowledgeService text chunks + hybrid retrieval + source citations
    ├─ VectorIndex     optional embeddings + persistent local cosine index
-   ├─ ToolRegistry    explicit allow-list tools
+   ├─ ToolRegistry    allow-list + workspace write/edit/shell
+   ├─ ApprovalBroker  per-call human decisions + audit events
+   ├─ McpManager      external stdio servers + tool discovery
    ├─ SkillRegistry   Markdown skills + metadata matching
-   ├─ Provider        OpenAI-compatible / CLI → local fallback
+   ├─ Provider        OpenAI-compatible / Anthropic / CLI → local fallback
    └─ JsonStore       serialized atomic persistence
 ```
 
@@ -222,7 +245,7 @@ message.accepted
   → execution.completed
 ```
 
-SSE 只是事件投影。客户端断线重连时，可以用 `after=` 或 `Last-Event-ID` 补放 durable events，避免把前端当成第二个状态源。
+SSE 是事件投影。客户端用 `after=` 或优先的 `Last-Event-ID` 补放仍保留的持久事件，服务端按每页 500 条补放。`agent.delta` 是不落盘、无 SSE id 的瞬时文本增量，断线期间不补发；最终回答通过持久化消息刷新恢复。
 
 ## API 速查
 
@@ -237,6 +260,8 @@ SSE 只是事件投影。客户端断线重连时，可以用 `after=` 或 `Last
 | POST | `/api/threads/:id/fork` | 从指定消息或当前历史创建分支 |
 | POST | `/api/threads/:id/messages` | 提交一轮编排 |
 | GET | `/api/threads/:id/plans` | 查询计划、各版步骤与复核结果 |
+| GET | `/api/threads/:id/plans/:planId` | 查询当前线程的指定计划 |
+| DELETE | `/api/threads/:id/agents/:agentId/session` | 清除该 Agent 的 CLI 会话绑定；运行中返回 409 |
 | GET | `/api/threads/:id/events` | 读取事件；加 `?stream=1` 获取 SSE |
 | GET/POST | `/api/memories` | 检索或写入长期记忆 |
 | GET/POST | `/api/knowledge/documents` | 查询或导入知识文档 |
@@ -244,7 +269,8 @@ SSE 只是事件投影。客户端断线重连时，可以用 `after=` 或 `Last
 | GET | `/api/knowledge/search` | 按 q 与 threadId 检索原文片段 |
 | GET | `/api/retrieval` | 查看 embedding 配置状态与当前范围索引进度 |
 | POST | `/api/retrieval/reindex` | 分批补建文档与长期记忆缺失的向量 |
-| GET/POST/PATCH | `/api/tasks` | 查询、创建或更新任务 |
+| GET/POST | `/api/tasks` | 查询或创建任务 |
+| PATCH | `/api/tasks/:id` | 更新任务标题、负责人或状态 |
 | GET | `/api/tools` | 查看 allow-list 工具 |
 | GET | `/api/threads/:id/approvals` | 列出该线程待审批的工具调用 |
 | POST | `/api/approvals/:id` | 审批决策，body `{ decision: 'approve' \| 'deny', reason? }` |
@@ -270,7 +296,7 @@ npm run mcp
 
 ### 写入工具与人工审批
 
-Web runtime 额外提供 `workspace_write`、`workspace_edit` 与 `shell_exec`，每次调用都要在 UI 的审批卡片中批准后才执行（`ORBIT_APPROVAL_TIMEOUT_MS`，默认 10 分钟，超时按拒绝处理）。路径限定在 workspace 内，拒绝 `.env*`、`.git/` 与数据目录；覆盖前备份到 `data/backups/`；不提供删除工具，删除类 shell 命令直接拒绝。`ORBIT_TOOL_POLICY=read-only` 可关闭全部写入类工具。
+Web runtime 额外提供 `workspace_write`、`workspace_edit` 与 `shell_exec`，每次调用都要在 UI 的审批卡片中批准后才执行（`ORBIT_APPROVAL_TIMEOUT_MS`，默认 10 分钟，超时按拒绝处理）。文件工具路径限定在 workspace 内，禁止 `.env` / `.env.*`（允许 `.env.example` 模板），写入还禁止 `.git/` 与数据目录；覆盖前备份到数据目录的 `backups/`。不提供文件删除工具，shell 拦截已知删除形式，但命令规则和 cwd 限制不是 OS 沙箱。`ORBIT_TOOL_POLICY=read-only` 让模型只获得声明为只读的注册工具；外部 CLI 的内部工具由 CLI 自身管理。
 
 ### 连接外部 MCP server（client）
 
@@ -297,18 +323,20 @@ Web runtime 额外提供 `workspace_write`、`workspace_edit` 与 `shell_exec`�
 
 Orbit 将当前版本控制在一条可验证的协作闭环内：
 
-- 有副作用的工具（写入、shell、外部 MCP）逐次人工审批，不提供删除工具，不允许工具路径逃逸配置的 workspace；
+- Web 文件写入/编辑及 shell 逐次审批，外部 MCP 默认审批但可配置 `autoApprove`；文件工具校验 workspace 实际路径，shell/MCP/CLI 不具备 OS 级隔离；
 - 不接收浏览器传入的模型密钥，Provider 是唯一的外部模型边界；
 - 不把无限历史塞给模型，消息、事件和上下文都有明确上限；
-- 会话与原文由 `JsonStore` 串行持久化；可重建的向量缓存由独立索引写入，均使用临时文件替换；
+- 会话与原文由 `JsonStore` 串行持久化，向量缓存独立写入。正常路径使用临时文件替换，领域状态替换失败时的直接覆盖退路不具备原子性；
 - CLI 适配器是显式 opt-in 的外部进程边界，交互式 PTY 和自动权限升级暂不支持；
-- 当前不包含多用户认证、组织权限、HTTP/SSE MCP transport、OS 级沙箱、Redis/向量数据库和自动调度。
+- 当前不包含多用户认证、组织权限、HTTP/SSE MCP transport、OS 级沙箱、Redis/独立向量数据库和自动调度；
+- HTTP 已移除 CORS 响应头，并校验 API Host 与写请求 Origin；额外 Host 通过 `ORBIT_ALLOWED_HOSTS` 配置，这不替代身份认证；
+- 事件补放和 CLI 会话续接已实现；统一取消、执行检查点和任务断点续跑尚未实现。
 
 后续可以将 `JsonStore` 替换为 SQLite/Redis，将本地向量索引替换为专用向量存储，或增加独立的 rerank 模型。
 
 ## 项目文档
 
-- [`docs/AGENT-V0.md`](docs/AGENT-V0.md)：v0 能力地图、演示路径和明确限制
+- [`docs/AGENT-V0.md`](docs/AGENT-V0.md)：历史 v0 能力快照及当前实现入口
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：分层、领域模型、事件契约、并发与安全边界
 - [`docs/CORE-FEATURES.md`](docs/CORE-FEATURES.md)：每项核心能力的触发方式与边界行为
 - [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md)：模块走读、扩展点和已知问题

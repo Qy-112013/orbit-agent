@@ -1,4 +1,6 @@
-# Orbit Agent v0
+# Orbit Agent v0 — historical snapshot
+
+> Historical v0 snapshot; annotated 2026-09-28. The capability map and limits below describe that earlier stage, not the current 0.3.0 code. Current Web runtime supports approved file writes/edits/shell, model-driven tools, Anthropic and API streaming, model summaries, hybrid retrieval, planning/replanning, external MCP clients and Codex/Claude Code native session resume. See [CORE-FEATURES.md](CORE-FEATURES.md) and [README](../README.md) for current setup and limits. Run `npm ci` before using the demo commands on a fresh checkout.
 
 Orbit v0 is a local-first Agent Runtime with a Web chat surface and an MCP
 stdio surface. A request can be routed to one or more named agents, enriched

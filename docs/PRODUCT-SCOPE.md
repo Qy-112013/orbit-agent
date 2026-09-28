@@ -1,36 +1,44 @@
 # Product scope
 
+> 当前产品范围，核对日期：2026-09-28，包版本：0.3.0。
+
 ## 目标
 
-Orbit Agent 面向个人开发者和小型团队，解决一个具体问题：当一个任务需要架构、执行和审查等不同视角时，用户不应该手动复制上下文、记住谁负责什么，或猜测系统到底做了哪一步。
+Orbit Agent 面向个人开发者的本地工作区，把持续会话、资料检索、架构/执行/审查分工和可追踪执行放在同一工作台。可用于小团队共同设计流程，但当前没有多人账号与权限隔离。
 
-## 保留的核心能力
+## 已实现的核心能力
 
-| 能力 | 用户价值 | 技术表现 |
-| --- | --- | --- |
-| 稳定 Agent 身份 | 结果有明确的角色和责任归属 | `AgentRegistry` + role prompt |
-| 持久协作线程 | 重启后仍能接着工作 | `JsonStore` 的 Thread/Message |
-| 确定性 mention 路由 | 用户明确指定目标，系统不靠模型猜 | `@atlas/@forge/@lens/@all` |
-| 串行/并行编排 | 多视角独立判断或逐步接力 | `Orchestrator` + route strategy |
-| 记忆与引用 | 相关事实可复用，来源可追踪 | 有界的 embedding / 关键词混合召回与原文引用 |
-| 工具边界 | Agent 能扩展，但能力可审计 | allow-list `ToolRegistry` |
-| 可观测执行轨迹 | 能定位路由、上下文、Provider 或存储问题 | persisted events + SSE |
-| Provider 可替换 | 不锁死某一家模型，离线也能演示 | OpenAI-compatible + local fallback |
+| 能力 | 当前表现 |
+| --- | --- |
+| 身份与协作 | 稳定角色、确定性路由、线程队列、串行/并行、受限委派、两轮讨论 |
+| 会话连续性 | 搜索、重命名、归档、分支、模型摘要及抽取式兜底；Codex/Claude Code 原生 session 绑定与续接 |
+| 资料与记忆 | 文本知识库、长期记忆、BM25/embedding 混合召回、原文引用 |
+| 工具执行 | 模型驱动 ReAct；工作区读取、审批后写入/编辑/shell、覆盖备份 |
+| 计划 | 结构化步骤、结果留存、模型复核与有限重规划 |
+| Provider | OpenAI-compatible、Anthropic、Codex/Claude Code/Pi CLI；按 Agent 配置、API 流式与重试、本地降级 |
+| 扩展与观测 | Markdown Skills、MCP stdio 服务端/客户端；持久事件、SSE 补放、瞬时文本增量、审批轨迹 |
 
-## 暂不做的能力
+使用方法见 [CORE-FEATURES.md](CORE-FEATURES.md)。流式、模型工具循环和逐次审批已经完成，不再作为待实现的演进项。
 
-以下方向不是永远不做，而是当前版本明确排除，避免项目叙事失焦：
+## 尚未覆盖的能力
 
-- 多用户账号、组织权限和跨 workspace 联邦；
-- 任意 shell/PTY 执行和自动修改用户仓库；
-- Redis 高可用、独立向量数据库、独立 rerank 模型；
-- 桌面安装器、语音、日程、游戏和第三方 IM 连接器；
-- 大型插件市场、自动调度和复杂审批治理。
+- 持久执行检查点、统一取消、自动断点续跑、后台 Agent 邮箱与定时调度。
+- worktree 隔离、并行文件冲突协调、依赖图并行调度，以及强制测试/交付物/发布门禁。
+- OS 级沙箱、交互式 PTY、CLI 实时输出桥接、Pi 原生 session 续接。
+- 多用户账号、组织权限、跨 workspace 联邦和生产级限流。
+- SQLite/Redis 多实例存储、永久审计、独立向量数据库与独立 reranker。
+- PDF/Word/OCR、多模态知识导入、自动网页抓取。
+- MCP HTTP/SSE transport、OAuth、自动重连治理；大型插件市场和复杂审批治理。
+- 桌面安装器、语音、日程及第三方 IM 连接器。
 
-## 后续演进顺序
+审批后的文件与 shell 操作已经可用；命令拦截和 cwd 约束不构成 OS 沙箱。事件补放、CLI 会话续接与任务断点恢复具有不同语义，当前没有承诺自动重放已发生副作用的步骤。
 
-1. 用 SQLite 替换 `JsonStore`，保留同样的 store 方法和事件序列。
-2. 在已实现的本地 embedding 混合检索之上增加 rerank，或替换专用向量存储，保留 lexical fallback。
-3. 将 Provider 调用升级为 token streaming，同时复用现有 SSE 事件协议。
-4. 为工具增加 capability policy 和人工确认状态。
-5. 只有出现真实多用户需求时，才引入 auth 与租户隔离。
+## 后续演进方向
+
+1. 补齐统一取消、执行检查点与请求幂等，明确失败步骤及副作用的恢复语义。
+2. 增加文件/工作区隔离、交付物与实际验收机制。
+3. 改善存储事务、崩溃恢复和审计保留，再评估 SQLite 等替代实现。
+4. 补齐类型检查、CLI session 专项回归、文档与接口的一致性检查。
+5. 根据实际资料质量增加解析或 rerank；出现多人需求后增加身份认证与权限。
+
+这些是后续方向，不是已交付能力或时间承诺。具体代码风险见 [IMPLEMENTATION.md](IMPLEMENTATION.md#9-仍存在的限制与代码风险)。

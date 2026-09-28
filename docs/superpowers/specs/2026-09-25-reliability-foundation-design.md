@@ -1,5 +1,8 @@
 # 子项目 1：可靠性基础 — 设计
 
+> 历史设计稿；实现状态核对：2026-09-28。可靠性、原生 Anthropic、结构化输出与缓存用量记录已实现。当前 Anthropic 使用流式接口，maxTokens 默认 64,000；历史背景中的非流式/无重试及 16,000 默认值不代表现状。重试和 schema 测试实际集中在 test/reliability.test.ts。 当前使用与限制以 [核心能力](../../CORE-FEATURES.md)、[架构](../../ARCHITECTURE.md) 和 [实现说明](../../IMPLEMENTATION.md) 为准。以下保留当时设计背景。
+
+
 日期：2026-09-25
 范围：P1 中的模型调用重试/退避、结构化输出、prompt caching，以及为此新增的原生 Anthropic provider。
 不在范围：token 级流式、LLM 上下文压缩（子项目 2）；MCP client、写入类工具、人工审批、沙箱（子项目 3）。
@@ -73,6 +76,6 @@
 ## 6. 测试
 
 - `test/anthropic-provider.test.ts`：注入 fetch 捕获请求体，断言 system `cache_control`、顶层 `cache_control`、`thinking`、`output_config`（effort/format）、tools 排序、tool_result 合并、`providerState` 回传、refusal 抛错、usage 归一化。
-- `test/retry.test.ts`：429 + `retry-after`、5xx 退避后成功、400 不重试、超时重试、耗尽后抛错；注入 `sleep`。
-- `test/structured-output.test.ts`：schema 裁剪与 `required`/`additionalProperties` 规范化；planner 把 `responseSchema` 传给 provider；OpenAI 请求体含 `response_format`。
+- `test/reliability.test.ts`：429 + `retry-after`、5xx 退避后成功、400 不重试、超时重试、耗尽后抛错；注入 `sleep`。
+- `test/reliability.test.ts`：schema 裁剪与 `required`/`additionalProperties` 规范化；planner 把 `responseSchema` 传给 provider；OpenAI 请求体含 `response_format`。
 - 现有测试与 `npm run check` 全部通过。

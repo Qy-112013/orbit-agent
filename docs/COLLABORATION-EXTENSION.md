@@ -1,6 +1,6 @@
 # Orbit 多 Agent 协作扩展
 
-本次扩展优先解决“Agent 能否互相求助、回应和复核”，同时保留轻量部署：没有新增 npm 运行时依赖，继续复用 Provider、线程、JsonStore 和 SSE。
+当前实现核对日期：2026-09-28。协作层解决“Agent 能否互相求助、回应和复核”，复用 Provider、线程、JsonStore 和 SSE。项目当前依赖 `@anthropic-ai/sdk`，不能再描述为零运行时依赖。
 
 v0.3 的持续会话、文档 RAG、计划执行与重规划见 [SESSION-RAG-PLANNING.md](SESSION-RAG-PLANNING.md)。
 
@@ -16,7 +16,7 @@ v0.3 的持续会话、文档 RAG、计划执行与重规划见 [SESSION-RAG-PLA
 
 ## 1. 主 Agent 委派并接收结果
 
-适用于支持 function calling 的 OpenAI-compatible API 模型：
+适用于支持工具调用的 OpenAI-compatible 或原生 Anthropic API 模型：
 
 ~~~text
 @atlas 请先让 Forge 提出实现建议，再把结果交给 Lens 复核，最后汇总。
@@ -70,7 +70,7 @@ Provider 返回工具请求 → 检查权限与参数 → 执行工具
 
 默认上限是每个 Agent run 最多 5 次模型调用、8 次工具请求；拒绝和参数错误也计入工具请求次数。整个批次先检查预算，最后一次模型调用若仍要求工具，则在执行新工具之前停止。
 
-模型可以自主使用 search_memory、search_knowledge、read_knowledge、list_tasks、workspace_list、workspace_read。remember 和 create_task 仍由明确的用户命令或 API 触发。delegate_to_agent 仅在允许委派的父 run 中临时提供。
+模型可以自主使用 search_memory、search_knowledge、read_knowledge、list_tasks、workspace_list、workspace_read。Web runtime 还提供 workspace_write、workspace_edit 和 shell_exec，每次调用前审批；外部 MCP 工具默认审批，autoApprove 中的工具免审批。remember 和 create_task 仍由明确的用户命令、API 或 MCP 服务端调用触发，不向自主模型循环暴露。delegate_to_agent 仅在允许委派的父 run 中临时提供。
 
 工具参数执行声明中使用的 JSON Schema 子集校验。文件读取校验实际路径，拒绝指向工作区外的符号链接；单文件读取最多 200,000 字节，返回给模型的单次工具结果最多 8,000 字符，裁剪会明确标记。
 
@@ -93,7 +93,7 @@ npm start
 - discussion.round.started / discussion.round.completed
 - provider.fallback
 
-事件沿用“持久化后广播”的路径。SSE 可以补放现有持久事件，界面显示委派方向、讨论轮次、工具失败与降级结果。工具原始文件内容和中间模型正文不会新增写入事件载荷；最终回答仍正常持久化。事件数量仍受 JsonStore 的现有限额约束。
+事件沿用“持久化后广播”的路径。SSE 可以补放现有持久事件，界面显示委派方向、讨论轮次、工具失败与降级结果。普通工具完成事件不保存完整原始输出，但审批事件会保存有限的命令/变更预览。模型协议中的推理内容不会新增写入持久事件；最终回答仍正常持久化。API 文本增量通过瞬时 agent.delta 广播，不落盘、不补放。事件数量仍受 JsonStore 的现有限额约束。
 
 工具失败以结构化错误交回模型；执行上限触发明确的 Agent 失败，后续用户回合仍可运行。外部 Provider 降级到 LocalProvider 时会记录事件，并在回答中标记本地降级。
 
@@ -111,4 +111,4 @@ npm run demo:collaboration
 
 ## 6. 当前范围
 
-与 Clowder 仍有明显范围差异：当前没有后台 Agent 邮箱、长期球权状态机、子会话恢复、worktree 隔离、强制 review gate 和组织权限。本次边界是可演示、可验证的有界协作，事件补放不代表进程中断后会自动恢复未完成的工具执行。
+与 Clowder 仍有明显范围差异：当前没有后台 Agent 邮箱、长期球权状态机、执行子任务断点恢复、worktree 隔离、强制 review gate 和组织权限。Codex/Claude Code 已有按线程与 Agent 保存的原生会话绑定和续接，Pi 暂无；这不代表恢复完整的子任务执行状态。本次边界是可演示、可验证的有界协作，事件补放不代表进程中断后会自动恢复未完成的工具执行。
